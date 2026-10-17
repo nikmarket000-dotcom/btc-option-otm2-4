@@ -319,12 +319,18 @@ class StrategyEngine:
         hedge_legs = st.get("hedge_legs", [])
         spot = cls.get_spot()
         qty = CONFIG["CONTRACT_SIZE"]
+        now_utc = datetime.now(timezone.utc)
 
         # 1. Manage Active Long Legs (Hold until 24h Expiry)
         remaining_longs = []
         for l in active_longs:
-            l["hours_held"] = l.get("hours_held", 0) + 1
-            if l["hours_held"] >= 24:
+            if l.get("entry_time"):
+                try:
+                    et = datetime.fromisoformat(l["entry_time"])
+                    l["hours_held"] = round((now_utc - et).total_seconds() / 3600.0, 2)
+                except Exception:
+                    pass
+            if l.get("hours_held", 0) >= 24.0:
                 # Settle
                 if l["type"] == "P":
                     val = max(0.0, l["strike"] - spot)
@@ -347,8 +353,13 @@ class StrategyEngine:
 
         # 2. Manage Active Short Leg
         if active_short is not None:
-            active_short["hours_held"] = active_short.get("hours_held", 0) + 1
-            t_left = max(0.0, 24 - active_short["hours_held"]) / (365.0 * 24.0)
+            if active_short.get("entry_time"):
+                try:
+                    et = datetime.fromisoformat(active_short["entry_time"])
+                    active_short["hours_held"] = round((now_utc - et).total_seconds() / 3600.0, 2)
+                except Exception:
+                    pass
+            t_left = max(0.0001, 24.0 - active_short.get("hours_held", 0)) / (365.0 * 24.0)
 
             if active_short["type"] == "P":
                 val = bs_put(spot, active_short["strike"], t_left)
