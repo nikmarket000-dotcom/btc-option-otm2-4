@@ -1,0 +1,41 @@
+{
+  "position": "BULL_PUT_SPREAD",
+  "short_leg": "BTC-18OCT26-62000-P",
+  "long_leg": "BTC-18OCT26-60000-P",
+  "short_entry_premium": 550.63,
+  "long_entry_premium": 309.56,
+  "net_credit": 241.07,
+  "stop_loss_trigger": 1101.26,
+  "entry_time": "2026-10-17T05:45:17.363293+00:00",
+  "expiry_time": "2026-10-18T08:00:00+00:00",
+  "last_signal": "BULLISH",
+  "cooldown_direction": null,
+  "trade_history": [
+    {
+      "position": "BULL_PUT_SPREAD",
+      "short_leg": "BTC-18OCT26-63000-P",
+      "long_leg": "BTC-18OCT26-61000-P",
+      "entry_time": "2026-10-17T05:45:17.349202+00:00",
+      "exit_time": "2026-10-17T05:45:17.354909+00:00",
+      "short_entry_premium": 562.58,
+      "short_exit_price": 2529.77,
+      "long_entry_premium": 321.98,
+      "long_exit_price": 638.02,
+      "realized_pnl": -1651.15,
+      "exit_reason": "2x Premium Stop-Loss Hit"
+    },
+    {
+      "position": "BEAR_CALL_SPREAD",
+      "short_leg": "BTC-18OCT26-64000-C",
+      "long_leg": "BTC-18OCT26-66000-C",
+      "entry_time": "2026-10-17T05:45:17.358659+00:00",
+      "exit_time": "2026-10-17T05:45:17.362255+00:00",
+      "short_entry_premium": 526.64,
+      "short_exit_price": 676.13,
+      "long_entry_premium": 284.91,
+      "long_exit_price": 550.63,
+      "realized_pnl": 116.23,
+      "exit_reason": "Trend Reversal (Bear to Bull)"
+    }
+  ]
+}
