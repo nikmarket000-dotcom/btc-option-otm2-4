@@ -56,6 +56,8 @@ CONFIG = {
     "WEBHOOK_HOST": "0.0.0.0",
     "WEBHOOK_PORT": int(os.getenv("PORT", 8085)),
     "WEBHOOK_SECRET_TOKEN": os.getenv("WEBHOOK_SECRET_TOKEN", "SUPER_TREND_SECRET_123"),
+    "AUTO_TRADING_ENABLED": True,      # 100% Free Autonomous Trading (No TradingView needed!)
+    "AUTO_POLL_INTERVAL_SECONDS": 45,  # Checks live exchange candles every 45s
     
     # Telegram Bot Settings
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", "8738017140:AAEx4COFhEC-2wfxFlGaEPAx8xUFtV8oEEU"),
@@ -594,6 +596,28 @@ def telegram_polling_worker():
                     else:
                         telegram.send_message("❌ Usage: /trend4h BULLISH or /trend4h BEARISH")
 
+                elif text == "/market":
+                    c1 = fetch_live_klines("1h", 30)
+                    c4 = fetch_live_klines("4h", 30)
+                    if c1 and c4:
+                        d1 = "🟢 BULLISH" if calculate_supertrend(c1)[-1] == 1 else "🔴 BEARISH"
+                        d4 = "🟢 BULLISH" if calculate_supertrend(c4)[-1] == 1 else "🔴 BEARISH"
+                        p = c1[-1]['close']
+                        telegram.send_message(
+                            f"🌐 <b>LIVE BITCOIN MARKET</b>\n"
+                            f"<b>BTC Spot:</b> ${p:,.2f}\n"
+                            f"<b>1H Supertrend:</b> {d1}\n"
+                            f"<b>4H Supertrend:</b> {d4}\n"
+                            f"<b>Auto-Trading:</b> {'ENABLED ✅' if CONFIG.get('AUTO_TRADING_ENABLED') else 'DISABLED ❌'}"
+                        )
+                    else:
+                        telegram.send_message("❌ Failed to fetch live market feeds.")
+
+                elif text == "/autotrade":
+                    CONFIG["AUTO_TRADING_ENABLED"] = not CONFIG.get("AUTO_TRADING_ENABLED", True)
+                    st_str = "ENABLED ✅ (100% Autonomous)" if CONFIG["AUTO_TRADING_ENABLED"] else "DISABLED ❌ (Manual only)"
+                    telegram.send_message(f"⚙️ <b>Autonomous Live Trading is now:</b> {st_str}")
+
         except Exception as e:
             pass
         time.sleep(1.5)
@@ -689,6 +713,106 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
+# --- LIVE CANDLE FETCHER & AUTONOMOUS TRADER (100% FREE - NO TRADINGVIEW NEEDED) ---
+def fetch_live_klines(interval="1h", limit=50):
+    ctx = ssl._create_unverified_context()
+    # 1. Binance public candles
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={interval}&limit={limit}"
+        req = urllib.request.Request(url, headers={"User-Agent": "OptionsBot/1.0"})
+        with urllib.request.urlopen(req, context=ctx, timeout=8) as res:
+            raw = json.loads(res.read().decode())
+            return [{'open': float(c[1]), 'high': float(c[2]), 'low': float(c[3]), 'close': float(c[4])} for c in raw]
+    except Exception:
+        pass
+    # 2. Coinbase public candles
+    try:
+        gran = 3600 if interval == "1h" else 14400
+        url = f"https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity={gran}"
+        req = urllib.request.Request(url, headers={"User-Agent": "OptionsBot/1.0"})
+        with urllib.request.urlopen(req, context=ctx, timeout=8) as res:
+            raw = json.loads(res.read().decode())
+            raw.reverse()
+            return [{'open': float(c[3]), 'high': float(c[2]), 'low': float(c[1]), 'close': float(c[4])} for c in raw[-limit:]]
+    except Exception:
+        pass
+    return []
+
+def calculate_supertrend(candles, period=10, multiplier=3.0):
+    n = len(candles)
+    if n < period + 1: return []
+    tr = [0.0] * n
+    for i in range(n):
+        hl = candles[i]['high'] - candles[i]['low']
+        tr[i] = hl if i == 0 else max(hl, abs(candles[i]['high'] - candles[i-1]['close']), abs(candles[i]['low'] - candles[i-1]['close']))
+    
+    atr = [0.0] * n
+    atr[period - 1] = sum(tr[:period]) / period
+    for i in range(period, n):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+
+    direction = [1] * n
+    upper_band, lower_band = [0.0] * n, [0.0] * n
+    for i in range(period, n):
+        hl2 = (candles[i]['high'] + candles[i]['low']) / 2.0
+        bu, bl = hl2 + multiplier * atr[i], hl2 - multiplier * atr[i]
+        if i == period:
+            upper_band[i], lower_band[i] = bu, bl
+            direction[i] = 1 if candles[i]['close'] > upper_band[i] else -1
+        else:
+            prev_close = candles[i-1]['close']
+            upper_band[i] = bu if bu < upper_band[i-1] or prev_close > upper_band[i-1] else upper_band[i-1]
+            lower_band[i] = bl if bl > lower_band[i-1] or prev_close < lower_band[i-1] else lower_band[i-1]
+            if direction[i-1] == 1:
+                direction[i] = -1 if candles[i]['close'] < lower_band[i] else 1
+            else:
+                direction[i] = 1 if candles[i]['close'] > upper_band[i] else -1
+    return direction
+
+def live_candle_autotrader_loop():
+    logger.info("Autonomous live candle trader started (Zero TradingView needed!).")
+    last_1h_trend = None
+
+    while True:
+        try:
+            if CONFIG.get("AUTO_TRADING_ENABLED", True):
+                c1 = fetch_live_klines("1h", 50)
+                c4 = fetch_live_klines("4h", 50)
+
+                if c1 and c4:
+                    latest_spot = c1[-1]['close']
+                    StrategyEngine.set_spot(latest_spot)
+
+                    dirs1 = calculate_supertrend(c1)
+                    dirs4 = calculate_supertrend(c4)
+
+                    if dirs1 and dirs4:
+                        curr_1h = "BULLISH" if dirs1[-1] == 1 else "BEARISH"
+                        curr_4h = "BULLISH" if dirs4[-1] == 1 else "BEARISH"
+
+                        state_mgr.update(trend_4h=curr_4h)
+
+                        if last_1h_trend is None:
+                            last_1h_trend = curr_1h
+                            logger.info(f"Initialized Live Feeds: 1H {curr_1h} | 4H {curr_4h} | BTC ${latest_spot:,.2f}")
+                            if not state_mgr.state.get("active_short"):
+                                StrategyEngine.handle_signal(curr_1h, trend_4h=curr_4h)
+                        elif curr_1h != last_1h_trend:
+                            logger.info(f"🚨 LIVE 1H FLIP DETECTED: {last_1h_trend} ➡️ {curr_1h} (4H: {curr_4h})")
+                            last_1h_trend = curr_1h
+                            telegram.send_message(
+                                f"🤖 <b>AUTONOMOUS LIVE SIGNAL DETECTED</b>\n"
+                                f"<b>BTC Spot:</b> ${latest_spot:,.2f}\n"
+                                f"1H Supertrend flipped to <b>{curr_1h}</b> (4H Trend: <b>{curr_4h}</b>).\n"
+                                f"<i>Processing trade automatically with zero subscriptions!</i>"
+                            )
+                            StrategyEngine.handle_signal(curr_1h, trend_4h=curr_4h)
+
+        except Exception as e:
+            logger.error(f"Error in autotrader loop: {e}")
+
+        time.sleep(CONFIG.get("AUTO_POLL_INTERVAL_SECONDS", 45))
+
 
 def start_bot():
     logger.info("Starting 1H Supertrend Options Paper Bot...")
@@ -699,7 +823,10 @@ def start_bot():
     # 2. Start Telegram Polling Worker
     threading.Thread(target=telegram_polling_worker, daemon=True, name="TelegramWorker").start()
 
-    # 3. Start Webhook HTTP Server
+    # 3. Start Live Autonomous Market Fetcher (Free TradingView alternative!)
+    threading.Thread(target=live_candle_autotrader_loop, daemon=True, name="LiveAutoTrader").start()
+
+    # 4. Start Webhook HTTP Server (optional backup)
     server = HTTPServer((CONFIG["WEBHOOK_HOST"], CONFIG["WEBHOOK_PORT"]), WebhookHandler)
     logger.info(f"Webhook listener online: http://{CONFIG['WEBHOOK_HOST']}:{CONFIG['WEBHOOK_PORT']}/webhook")
     
