@@ -67,9 +67,9 @@ if os.getenv("DELTA_API_KEY"):
 # --- CONFIGURATION ---
 CONFIG = {
     # Account & Trading
-    "STARTING_CAPITAL": 150.0,         # $150 total virtual balance
-    "ACTIVE_TRADING_CAPITAL": 100.0,   # $100 allocated for active trading
-    "RESERVE_BUFFER": 50.0,            # $50 untouched safety reserve
+    "STARTING_CAPITAL": float(os.getenv("STARTING_CAPITAL", 200.0)),         # $200 Delta Testnet account
+    "ACTIVE_TRADING_CAPITAL": float(os.getenv("ACTIVE_TRADING_CAPITAL", 100.0)),   # $100 allocated for active trading
+    "RESERVE_BUFFER": float(os.getenv("RESERVE_BUFFER", 100.0)),            # $100 safety reserve
     "UNDERLYING": "BTC",               # BTC
     "CONTRACT_SIZE": 0.01,             # 0.01 BTC (10 micro-contracts on Delta)
     "STRIKE_INTERVAL": 1000.0,         # $1,000 strike interval for BTC
@@ -564,15 +564,28 @@ def telegram_polling_worker():
                     telegram.send_message(reply)
 
                 elif text in ["/balance", "/status"]:
-                    bal = st["balance"]
-                    init = st["initial_capital"]
+                    init = 200.0
+                    bal = st.get("balance", 200.0)
+                    inr_str = ""
+                    exch_name = "Delta Exchange India Testnet"
+                    if delta_client:
+                        try:
+                            w = delta_client.get_wallet_balances()
+                            if w.get("success"):
+                                bal = w.get("available_usd", bal)
+                                inr_val = w.get("available_inr", 0.0)
+                                if inr_val > 0:
+                                    inr_str = f" (₹{inr_val:,.0f} INR)"
+                        except Exception:
+                            pass
                     pnl = bal - init
                     ret = (pnl / init) * 100
                     win_pct = (st["winning_trades"] / st["total_trades"] * 100) if st["total_trades"] > 0 else 0
                     reply = (
-                        f"📊 <b>ACCOUNT STATUS</b>\n"
+                        f"📊 <b>DELTA TESTNET ACCOUNT STATUS</b>\n"
+                        f"<b>Account:</b> {exch_name}\n"
                         f"<b>Starting Capital:</b> ${init:.2f}\n"
-                        f"<b>Current Balance:</b> ${bal:.2f}\n"
+                        f"<b>Available Margin:</b> ${bal:.2f}{inr_str}\n"
                         f"<b>Net Profit:</b> ${pnl:+.2f} ({ret:+.2f}%)\n"
                         f"<b>Total Trades:</b> {st['total_trades']}\n"
                         f"<b>Win Rate:</b> {win_pct:.1f}%\n"
