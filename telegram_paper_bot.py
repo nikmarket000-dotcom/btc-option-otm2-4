@@ -27,6 +27,22 @@ import urllib.request
 import urllib.parse
 import ssl
 
+# --- LOAD ENVIRONMENT VARIABLES ---
+def load_env_file():
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k not in os.environ:
+                        os.environ[k] = v
+
+load_env_file()
+
 # --- LOGGING SETUP ---
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +53,16 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("TelegramPaperBot")
+
+# --- DELTA EXCHANGE TESTNET CONNECTOR ---
+delta_client = None
+if os.getenv("DELTA_API_KEY"):
+    try:
+        from delta_client import DeltaClient
+        delta_client = DeltaClient()
+        logger.info("Delta Exchange India Testnet Client Initialized ✅")
+    except Exception as e:
+        logger.warning(f"DeltaClient not loaded: {e}")
 
 # --- CONFIGURATION ---
 CONFIG = {
