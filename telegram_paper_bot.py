@@ -373,13 +373,9 @@ class StrategyEngine:
 
         # --- 4-HOUR TREND FILTER CHECK (Cuts Drawdown from 27.5% down to 15.3%!) ---
         if CONFIG.get("USE_4H_FILTER") and signal != trend_4h:
-            logger.warning(f"4H Filter: 1H signal {signal} rejected because 4H Trend is {trend_4h}.")
-            telegram.send_message(
-                f"🛡️ <b>1H Signal Filtered Out (4H Filter Active)</b>\n"
-                f"Received 1H <b>{signal}</b>, but 4H Macro Trend is <b>{trend_4h}</b>.\n"
-                f"<i>Entry blocked to avoid choppy whipsaws & save exchange fees!</i>"
-            )
+            logger.info(f"4H Filter: 1H signal {signal} rejected because 4H Trend is {trend_4h}. Waiting for alignment.")
             return
+
 
         if curr_trend == signal and (st.get("active_short") or len(st.get("active_longs", [])) > 0):
             logger.info("Signal matches current trend. Position already active.")
@@ -1112,17 +1108,22 @@ def live_candle_autotrader_loop():
                         elif curr_1h != last_1h_trend:
                             logger.info(f"🚨 LIVE 1H FLIP DETECTED: {last_1h_trend} ➡️ {curr_1h} (4H: {curr_4h})")
                             last_1h_trend = curr_1h
-                            telegram.send_message(
-                                f"🤖 <b>AUTONOMOUS LIVE SIGNAL DETECTED</b>\n"
-                                f"<b>BTC Spot:</b> ${latest_spot:,.2f}\n"
-                                f"1H Supertrend flipped to <b>{curr_1h}</b> (4H Trend: <b>{curr_4h}</b>).\n"
-                                f"<i>Processing trade automatically with zero subscriptions!</i>"
-                            )
-                            StrategyEngine.handle_signal(curr_1h, trend_4h=curr_4h)
+                            if not CONFIG.get("USE_4H_FILTER") or curr_1h == curr_4h:
+                                telegram.send_message(
+                                    f"🤖 <b>AUTONOMOUS LIVE SIGNAL DETECTED</b>\n"
+                                    f"<b>BTC Spot:</b> ${latest_spot:,.2f}\n"
+                                    f"1H Supertrend flipped to <b>{curr_1h}</b> (4H Trend: <b>{curr_4h}</b>).\n"
+                                    f"<i>Processing trade automatically with zero subscriptions!</i>"
+                                )
+                                StrategyEngine.handle_signal(curr_1h, trend_4h=curr_4h)
+                            else:
+                                logger.info(f"1H flipped to {curr_1h}, but 4H is {curr_4h}. Waiting for alignment silently.")
                         elif not state_mgr.state.get("active_short") and not state_mgr.state.get("active_longs"):
                             if not is_in_settlement_window():
-                                logger.info(f"Settlement window complete (after 18:31 IST). Opening next cycle spread for {curr_1h}...")
-                                StrategyEngine.handle_signal(curr_1h, trend_4h=curr_4h)
+                                if not CONFIG.get("USE_4H_FILTER") or curr_1h == curr_4h:
+                                    logger.info(f"Trends aligned ({curr_1h}). Opening next cycle spread...")
+                                    StrategyEngine.handle_signal(curr_1h, trend_4h=curr_4h)
+
 
 
 
