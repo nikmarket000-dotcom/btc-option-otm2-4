@@ -72,9 +72,9 @@ CONFIG = {
     "RESERVE_BUFFER": float(os.getenv("RESERVE_BUFFER", 100.0)),            # $100 safety reserve
     "UNDERLYING": "BTC",               # BTC
     "CONTRACT_SIZE": 0.01,             # 0.01 BTC (10 micro-contracts on Delta)
-    "STRIKE_INTERVAL": 1000.0,         # $1,000 strike interval for BTC
-    "SHORT_OTM_STEP": 2,               # OTM 2
-    "LONG_OTM_STEP": 4,                # OTM 4
+    "STRIKE_INTERVAL": float(os.getenv("STRIKE_INTERVAL", 200.0)),          # $200 strike interval on Delta (OTM 2 = +$400, OTM 4 = +$800)
+    "SHORT_OTM_STEP": 2,               # OTM 2 = 2 * $200 = $400 away
+    "LONG_OTM_STEP": 4,                # OTM 4 = 4 * $200 = $800 away
     "TAKE_PROFIT_PCT": 0.80,           # 80% profit booking threshold
     "USE_4H_FILTER": True,             # 4-Hour Trend Confirmation Filter (Slashes Drawdown to 15.3% & saves $17 in fees!)
     
