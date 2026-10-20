@@ -64,6 +64,37 @@ if os.getenv("DELTA_API_KEY"):
     except Exception as e:
         logger.warning(f"DeltaClient not loaded: {e}")
 
+def get_cycle_target_date_code():
+    """
+    Returns exact date code (DDMMYY) for the Next-Day Daily 17:30 IST expiry:
+    On any day D in IST (from 00:00 to 23:59), selects expiry D+1 at 17:30 IST.
+    E.g. On 20th Oct (6:31 PM - 11:59 PM) -> '211026' (21st Oct expiry)
+         After 00:00 midnight (becomes 21st Oct) -> '221026' (22nd Oct expiry)
+    """
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc + timedelta(hours=5, minutes=30)
+    target_dt = now_ist.date() + timedelta(days=1)
+    return target_dt.strftime("%d%m%y")
+
+def get_cycle_target_expiry_display():
+    """Returns human-readable string for the target expiry, e.g. '21-Oct-2026 17:30 IST (211026)'"""
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc + timedelta(hours=5, minutes=30)
+    target_dt = now_ist.date() + timedelta(days=1)
+    return f"{target_dt.strftime('%d-%b-%Y')} 17:30 IST ({target_dt.strftime('%d%m%y')})"
+
+def is_in_settlement_window():
+    """
+    Delta Exchange daily settlement window is 17:30 IST to 18:30 IST.
+    During this 1-hour window, order placement can be rejected by exchange.
+    New trade cycle entry opens strictly after 18:30 IST (from 18:31 IST onwards).
+    """
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc + timedelta(hours=5, minutes=30)
+    start_buffer = now_ist.replace(hour=17, minute=30, second=0, microsecond=0)
+    end_buffer = now_ist.replace(hour=18, minute=31, second=0, microsecond=0)
+    return start_buffer <= now_ist < end_buffer
+
 # --- CONFIGURATION ---
 CONFIG = {
     # Account & Trading
@@ -77,6 +108,7 @@ CONFIG = {
     "LONG_OTM_STEP": 4,                # OTM 4 = 4 * $200 = $800 away
     "TAKE_PROFIT_PCT": 0.80,           # 80% profit booking threshold
     "USE_4H_FILTER": True,             # 4-Hour Trend Confirmation Filter (Slashes Drawdown to 15.3% & saves $17 in fees!)
+    "USD_TO_INR": float(os.getenv("USD_TO_INR", 85.0)), # USD to INR conversion rate for Delta India
     
     # Webhook Server
     "WEBHOOK_HOST": "0.0.0.0",
@@ -233,6 +265,98 @@ class StrategyEngine:
         state_mgr.update(simulated_spot=price)
 
     @classmethod
+    def get_current_metrics(cls):
+        """
+        Computes real-time:
+          - Net Balance (USD & INR)
+          - Running Trade Unrealized PnL (USD & INR)
+          - Total Equity (USD & INR)
+        """
+        st = state_mgr.state
+        spot = cls.get_spot()
+        qty = CONFIG["CONTRACT_SIZE"]
+        usd_to_inr = float(CONFIG.get("USD_TO_INR", 85.0))
+
+        # 1. Net Balance (USD & INR)
+        bal_usd = float(st.get("balance", 200.0))
+        bal_inr = bal_usd * usd_to_inr
+        if delta_client:
+            try:
+                w = delta_client.get_wallet_balances()
+                if w.get("success"):
+                    bal_usd = float(w.get("available_usd", bal_usd))
+                    delta_inr = float(w.get("available_inr", 0.0))
+                    if delta_inr > 0:
+                        bal_inr = delta_inr
+                    else:
+                        bal_inr = bal_usd * usd_to_inr
+            except Exception:
+                pass
+
+        # 2. Running Trade Unrealized PnL
+        running_pnl_usd = 0.0
+        active_short = st.get("active_short")
+        active_longs = st.get("active_longs", [])
+        hedge_legs = st.get("hedge_legs", [])
+
+        if active_short:
+            t_left = max(0.0001, 24.0 - active_short.get("hours_held", 0)) / (365.0 * 24.0)
+            s_val = bs_put(spot, active_short["strike"], t_left) if active_short["type"] == "P" else bs_call(spot, active_short["strike"], t_left)
+            if delta_client and active_short.get("product_symbol"):
+                try:
+                    q = delta_client.get_ticker_quote(active_short["product_symbol"])
+                    if q and q.get("mark_price", 0) > 0:
+                        s_val = q["mark_price"]
+                except Exception:
+                    pass
+            short_pnl = (active_short["entry_prem"] - s_val) * qty
+            running_pnl_usd += short_pnl
+
+        for l in active_longs:
+            t_left = max(0.0001, 24.0 - l.get("hours_held", 0)) / (365.0 * 24.0)
+            l_val = bs_put(spot, l["strike"], t_left) if l["type"] == "P" else bs_call(spot, l["strike"], t_left)
+            if delta_client and l.get("product_symbol"):
+                try:
+                    q = delta_client.get_ticker_quote(l["product_symbol"])
+                    if q and q.get("mark_price", 0) > 0:
+                        l_val = q["mark_price"]
+                except Exception:
+                    pass
+            long_pnl = (l_val - l["entry_prem"]) * qty
+            running_pnl_usd += long_pnl
+
+        for h in hedge_legs:
+            t_left = max(0.0001, 24.0 - h.get("hours_held", 0)) / (365.0 * 24.0)
+            h_val = bs_put(spot, h["strike"], t_left) if h["type"] == "P" else bs_call(spot, h["strike"], t_left)
+            h_pnl = (h_val - h["entry_prem"]) * qty
+            running_pnl_usd += h_pnl
+
+        running_pnl_inr = running_pnl_usd * usd_to_inr
+        equity_usd = bal_usd + running_pnl_usd
+        equity_inr = equity_usd * usd_to_inr
+
+        if abs(running_pnl_usd) < 0.001:
+            running_pnl_inr_str = "₹0 INR"
+        else:
+            running_pnl_inr_str = f"₹{running_pnl_inr:+,.0f} INR"
+
+        bal_inr_str = f"₹{bal_inr:,.0f} INR"
+        equity_inr_str = f"₹{equity_inr:,.0f} INR"
+
+        return {
+            "bal_usd": round(bal_usd, 2),
+            "bal_inr": round(bal_inr, 2),
+            "bal_inr_str": bal_inr_str,
+            "running_pnl_usd": round(running_pnl_usd, 2),
+            "running_pnl_inr": round(running_pnl_inr, 2),
+            "running_pnl_inr_str": running_pnl_inr_str,
+            "equity_usd": round(equity_usd, 2),
+            "equity_inr": round(equity_inr, 2),
+            "equity_inr_str": equity_inr_str,
+            "has_open": bool(active_short or active_longs)
+        }
+
+    @classmethod
     def handle_signal(cls, signal, trend_4h=None):
         """Processes 1H Supertrend signal from TradingView with 4H Trend Filter."""
         st = state_mgr.state
@@ -265,8 +389,14 @@ class StrategyEngine:
         if curr_trend and curr_trend != signal:
             cls.close_all_open_positions(reason=f"Trend Reversal ({curr_trend} ➡️ {signal})")
 
+        # --- DELTA SETTLEMENT WINDOW CHECK (17:30 - 18:30 IST) ---
+        if is_in_settlement_window():
+            logger.info("Delta Settlement Window active (17:30 - 18:30 IST). New spread entry paused until 18:31 IST to prevent order rejection.")
+            return
+
         state_mgr.update(current_trend=signal)
         cls.open_fresh_spread(signal)
+
 
     @classmethod
     def open_fresh_spread(cls, signal):
@@ -276,6 +406,9 @@ class StrategyEngine:
         atm = round(spot / interval) * interval
         qty = CONFIG["CONTRACT_SIZE"]
         T_init = 24.0 / (365.0 * 24.0)
+
+        target_date_code = get_cycle_target_date_code()
+        target_expiry_disp = get_cycle_target_expiry_display()
 
         if signal == "BULLISH":
             s_strike = atm - (CONFIG["SHORT_OTM_STEP"] * interval)
@@ -297,8 +430,8 @@ class StrategyEngine:
         l_prod = None
         if delta_client:
             try:
-                s_prod = delta_client.find_option(opt_type, s_strike)
-                l_prod = delta_client.find_option(opt_type, l_strike)
+                s_prod = delta_client.find_option(opt_type, s_strike, target_date=target_date_code)
+                l_prod = delta_client.find_option(opt_type, l_strike, target_date=target_date_code)
                 if s_prod:
                     q_s = delta_client.get_ticker_quote(s_prod["symbol"])
                     if q_s and q_s.get("mark_price", 0) > 0:
@@ -325,7 +458,9 @@ class StrategyEngine:
             "sl_trigger": sl_trigger,
             "entry_time": datetime.now(timezone.utc).isoformat(),
             "hours_held": 0,
-            "is_hedged": False
+            "is_hedged": False,
+            "expiry_code": target_date_code,
+            "expiry_display": target_expiry_disp
         }
         long_leg = {
             "type": opt_type,
@@ -334,7 +469,9 @@ class StrategyEngine:
             "product_id": l_prod["id"] if l_prod else None,
             "entry_prem": l_prem,
             "entry_time": datetime.now(timezone.utc).isoformat(),
-            "hours_held": 0
+            "hours_held": 0,
+            "expiry_code": target_date_code,
+            "expiry_display": target_expiry_disp
         }
 
         new_balance = st["balance"] - (l_prem * qty) - fees
@@ -347,17 +484,23 @@ class StrategyEngine:
             total_fees_paid=round(new_total_fees, 2)
         )
 
+        m = cls.get_current_metrics()
+
         msg = (
             f"🚀 <b>NEW SPREAD OPENED</b>\n"
             f"<b>Strategy:</b> {spread_name}\n"
             f"<b>BTC Spot:</b> ${spot:,.2f}\n"
+            f"📅 <b>Expiry:</b> {target_expiry_disp}\n"
             f"------------------------------------\n"
             f"🔻 <b>Sell {opt_type}:</b> Strike ${s_strike:,.0f} @ ${s_prem:.2f}\n"
             f"🔹 <b>Buy {opt_type}:</b> Strike ${l_strike:,.0f} @ ${l_prem:.2f}\n"
             f"💰 <b>Net Credit:</b> ${net_credit:.2f} ({qty} BTC)\n"
             f"🛡️ <b>2x SL Trigger:</b> ${sl_trigger:.2f}\n"
-            f"💵 <b>Current Balance:</b> ${new_balance:.2f}"
+            f"------------------------------------\n"
+            f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
+            f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
         )
+
         telegram.send_message(msg)
 
     @classmethod
@@ -371,7 +514,7 @@ class StrategyEngine:
         qty = CONFIG["CONTRACT_SIZE"]
         now_utc = datetime.now(timezone.utc)
 
-        # 1. Manage Active Long Legs (Hold until 24h Expiry)
+        # 1. Manage Active Long Legs (Hold until Expiry at 17:30 IST)
         remaining_longs = []
         for l in active_longs:
             if l.get("entry_time"):
@@ -380,7 +523,19 @@ class StrategyEngine:
                     l["hours_held"] = round((now_utc - et).total_seconds() / 3600.0, 2)
                 except Exception:
                     pass
-            if l.get("hours_held", 0) >= 24.0:
+
+            is_l_expired = False
+            if l.get("expiry_code"):
+                try:
+                    exp_dt = datetime.strptime(l["expiry_code"], "%d%m%y").replace(hour=12, minute=0, second=0, tzinfo=timezone.utc)
+                    if now_utc >= exp_dt:
+                        is_l_expired = True
+                except Exception:
+                    pass
+            if not is_l_expired and l.get("hours_held", 0) >= 24.0:
+                is_l_expired = True
+
+            if is_l_expired:
                 # Settle
                 if l["type"] == "P":
                     val = max(0.0, l["strike"] - spot)
@@ -391,11 +546,14 @@ class StrategyEngine:
                 new_bal = st["balance"] + proceeds
                 state_mgr.update(balance=round(new_bal, 2))
                 
+                m = cls.get_current_metrics()
                 telegram.send_message(
                     f"🏁 <b>Long Leg Expired</b>\n"
                     f"<b>Strike:</b> ${l['strike']:,.0f} {l['type']}\n"
                     f"<b>Settlement Value:</b> ${val:.2f}\n"
-                    f"<b>Wallet Balance:</b> ${new_bal:.2f}"
+                    f"------------------------------------\n"
+                    f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
+                    f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
                 )
             else:
                 remaining_longs.append(l)
@@ -409,7 +567,17 @@ class StrategyEngine:
                     active_short["hours_held"] = round((now_utc - et).total_seconds() / 3600.0, 2)
                 except Exception:
                     pass
-            t_left = max(0.0001, 24.0 - active_short.get("hours_held", 0)) / (365.0 * 24.0)
+
+            t_left = 0.0001
+            if active_short.get("expiry_code"):
+                try:
+                    exp_dt = datetime.strptime(active_short["expiry_code"], "%d%m%y").replace(hour=12, minute=0, second=0, tzinfo=timezone.utc)
+                    secs_left = max(1.0, (exp_dt - now_utc).total_seconds())
+                    t_left = secs_left / (365.0 * 24.0 * 3600.0)
+                except Exception:
+                    t_left = max(0.0001, 24.0 - active_short.get("hours_held", 0)) / (365.0 * 24.0)
+            else:
+                t_left = max(0.0001, 24.0 - active_short.get("hours_held", 0)) / (365.0 * 24.0)
 
             if active_short["type"] == "P":
                 val = bs_put(spot, active_short["strike"], t_left)
@@ -455,14 +623,27 @@ class StrategyEngine:
                 })
                 state_mgr.update(balance=round(new_bal, 2), total_fees_paid=round(new_fees, 2), hedge_legs=hedge_legs)
 
+                m = cls.get_current_metrics()
                 telegram.send_message(
                     f"🛡️ <b>OPTION A HEDGE TRIGGERED</b>\n"
-                    f"Short Leg {active_short['strike']} hit 2x trigger (${val:.2f})!\n"
+                    f"Short Leg ${active_short['strike']:,.0f} hit 2x trigger (${val:.2f})!\n"
                     f"Bought protective {h_type} Strike ${h_k:,.0f} @ ${h_prem:.2f}\n"
-                    f"Hedge Cost: ${hedge_cost:.2f} | Balance: ${new_bal:.2f}"
+                    f"Hedge Cost: ${hedge_cost:.2f}\n"
+                    f"------------------------------------\n"
+                    f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
+                    f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
                 )
 
-            expired = active_short["hours_held"] >= 24
+            expired = False
+            if active_short.get("expiry_code"):
+                try:
+                    exp_dt = datetime.strptime(active_short["expiry_code"], "%d%m%y").replace(hour=12, minute=0, second=0, tzinfo=timezone.utc)
+                    if now_utc >= exp_dt:
+                        expired = True
+                except Exception:
+                    pass
+            if not expired and active_short.get("hours_held", 0) >= 24.0:
+                expired = True
 
             # --- HANDLE 80% PROFIT BOOK & ROLL ---
             if tp_hit:
@@ -485,6 +666,9 @@ class StrategyEngine:
                 atm = round(spot / interval) * interval
                 T_init = 24.0 / (365.0 * 24.0)
 
+                target_expiry_code = get_cycle_target_date_code()
+                target_expiry_disp = get_cycle_target_expiry_display()
+
                 if active_short["type"] == "P":
                     new_k = atm - (CONFIG["SHORT_OTM_STEP"] * interval)
                     new_prem = bs_put(spot, new_k, T_init)
@@ -498,7 +682,7 @@ class StrategyEngine:
                 new_s_prod = None
                 if delta_client:
                     try:
-                        new_s_prod = delta_client.find_option(roll_type, new_k)
+                        new_s_prod = delta_client.find_option(roll_type, new_k, target_date=target_expiry_code)
                         if new_s_prod:
                             q_r = delta_client.get_ticker_quote(new_s_prod["symbol"])
                             if q_r and q_r.get("mark_price", 0) > 0:
@@ -519,16 +703,24 @@ class StrategyEngine:
                     "sl_trigger": round(new_prem * 2.0, 2),
                     "entry_time": datetime.now(timezone.utc).isoformat(),
                     "hours_held": 0,
-                    "is_hedged": False
+                    "is_hedged": False,
+                    "expiry_code": target_expiry_code,
+                    "expiry_display": target_expiry_disp
                 }
                 state_mgr.update(active_short=new_short, rolled_count=rolled_count)
 
+                m = cls.get_current_metrics()
+                profit_inr_str = f"₹{profit * CONFIG.get('USD_TO_INR', 85.0):+,.0f} INR"
+
                 telegram.send_message(
                     f"🎯 <b>80% PROFIT BOOKED & ROLLED!</b>\n"
-                    f"Closed Short {active_short['strike']} @ ${val:.2f} (Profit: +${profit:.2f})\n"
+                    f"✅ <b>Closed Short:</b> Strike ${active_short['strike']:,.0f} @ ${val:.2f} (Profit: +${profit:.2f} / {profit_inr_str})\n"
                     f"🔄 <b>Rolled New Short {roll_type}:</b> Strike ${new_k:,.0f} @ ${new_prem:.2f}\n"
+                    f"📅 <b>Expiry:</b> {target_expiry_disp}\n"
                     f"🛡️ <i>Existing Long Leg preserved as free hedge.</i>\n"
-                    f"💵 <b>Current Balance:</b> ${new_bal:.2f}"
+                    f"------------------------------------\n"
+                    f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
+                    f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
                 )
             
             elif expired:
@@ -536,11 +728,17 @@ class StrategyEngine:
                 profit = (active_short["entry_prem"] - val) * qty - s_settle_fee
                 new_bal = st["balance"] + profit
                 state_mgr.update(balance=round(new_bal, 2), active_short=None)
+                m = cls.get_current_metrics()
+                profit_inr_str = f"₹{profit * CONFIG.get('USD_TO_INR', 85.0):+,.0f} INR"
                 telegram.send_message(
-                    f"🏁 <b>Short Leg Expired at 24h</b>\n"
-                    f"Strike: ${active_short['strike']:,.0f} | Profit: ${profit:+.2f}\n"
-                    f"Balance: ${new_bal:.2f}"
+                    f"🏁 <b>Contract Expired & Settled (17:30 IST)</b>\n"
+                    f"<b>Short Strike:</b> ${active_short['strike']:,.0f} | <b>Profit:</b> ${profit:+.2f} ({profit_inr_str})\n"
+                    f"⏳ <i>Delta Settlement Window active (17:30 - 18:30 IST).\nNext cycle trade will automatically open at 18:31 IST!</i>\n"
+                    f"------------------------------------\n"
+                    f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
+                    f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
                 )
+
 
     @classmethod
     def close_all_open_positions(cls, reason):
@@ -573,11 +771,15 @@ class StrategyEngine:
             active_longs=[],
             hedge_legs=[]
         )
+        m = cls.get_current_metrics()
+        pnl_inr_str = f"₹{pnl_accum * CONFIG.get('USD_TO_INR', 85.0):+,.0f} INR"
         telegram.send_message(
             f"🔄 <b>POSITIONS CLOSED</b>\n"
             f"<b>Reason:</b> {reason}\n"
-            f"<b>Realized PnL:</b> ${pnl_accum:+.2f}\n"
-            f"<b>Wallet Balance:</b> ${new_bal:.2f}"
+            f"<b>Realized PnL:</b> ${pnl_accum:+.2f} ({pnl_inr_str})\n"
+            f"------------------------------------\n"
+            f"📈 <b>Running Trade PnL:</b> $0.00 (₹0 INR)\n"
+            f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
         )
 
 
@@ -613,29 +815,23 @@ def telegram_polling_worker():
 
                 elif text in ["/balance", "/status"]:
                     init = 200.0
-                    bal = st.get("balance", 200.0)
-                    inr_str = ""
-                    exch_name = "Delta Exchange India Testnet"
-                    if delta_client:
-                        try:
-                            w = delta_client.get_wallet_balances()
-                            if w.get("success"):
-                                bal = w.get("available_usd", bal)
-                                inr_val = w.get("available_inr", 0.0)
-                                if inr_val > 0:
-                                    inr_str = f" (₹{inr_val:,.0f} INR)"
-                        except Exception:
-                            pass
+                    m = StrategyEngine.get_current_metrics()
+                    bal = m["bal_usd"]
+                    inr_str = f" ({m['bal_inr_str']})"
                     pnl = bal - init
                     ret = (pnl / init) * 100
                     win_pct = (st["winning_trades"] / st["total_trades"] * 100) if st["total_trades"] > 0 else 0
                     reply = (
                         f"📊 <b>DELTA TESTNET ACCOUNT STATUS</b>\n"
-                        f"<b>Account:</b> {exch_name}\n"
+                        f"<b>Account:</b> Delta Exchange India Testnet\n"
                         f"<b>Starting Capital:</b> ${init:.2f}\n"
-                        f"<b>Available Margin:</b> ${bal:.2f}{inr_str}\n"
-                        f"<b>Net Profit:</b> ${pnl:+.2f} ({ret:+.2f}%)\n"
-                        f"<b>Total Trades:</b> {st['total_trades']}\n"
+                        f"------------------------------------\n"
+                        f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
+                        f"💵 <b>Net Account Balance:</b> ${bal:.2f}{inr_str}\n"
+                        f"💎 <b>Total Account Equity:</b> ${m['equity_usd']:.2f} ({m['equity_inr_str']})\n"
+                        f"------------------------------------\n"
+                        f"<b>Closed Realized Profit:</b> ${pnl:+.2f} ({ret:+.2f}%)\n"
+                        f"<b>Total Trades:</b> {st['total_trades']} (80% Rolls: {st.get('tp_80_count', 0)})\n"
                         f"<b>Win Rate:</b> {win_pct:.1f}%\n"
                         f"<b>Current Trend:</b> {st.get('current_trend', 'None')}\n"
                         f"<b>BTC Spot:</b> ${spot:,.2f}"
@@ -645,14 +841,28 @@ def telegram_polling_worker():
                 elif text == "/positions":
                     s = st.get("active_short")
                     longs = st.get("active_longs", [])
+                    m = StrategyEngine.get_current_metrics()
                     if not s and not longs:
-                        reply = "⚪ <b>No open positions. Strategy is flat.</b>"
+                        reply = (
+                            f"⚪ <b>No open positions. Strategy is flat.</b>\n"
+                            f"------------------------------------\n"
+                            f"📈 <b>Running Trade PnL:</b> $0.00 (₹0 INR)\n"
+                            f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
+                        )
                     else:
                         reply = "📋 <b>ACTIVE OPEN LEGS:</b>\n"
                         if s:
-                            reply += f"🔻 <b>Short {s['type']}:</b> Strike ${s['strike']:,.0f} | Entry: ${s['entry_prem']:.2f} | 2x SL: ${s['sl_trigger']:.2f}\n"
+                            exp_s = s.get("expiry_display", get_cycle_target_expiry_display())
+                            reply += f"🔻 <b>Short {s['type']}:</b> Strike ${s['strike']:,.0f} | Entry: ${s['entry_prem']:.2f} | 2x SL: ${s['sl_trigger']:.2f}\n   📅 <i>Expiry: {exp_s}</i>\n"
                         for l in longs:
-                            reply += f"🔹 <b>Long {l['type']}:</b> Strike ${l['strike']:,.0f} | Entry: ${l['entry_prem']:.2f}\n"
+                            exp_l = l.get("expiry_display", get_cycle_target_expiry_display())
+                            reply += f"🔹 <b>Long {l['type']}:</b> Strike ${l['strike']:,.0f} | Entry: ${l['entry_prem']:.2f}\n   📅 <i>Expiry: {exp_l}</i>\n"
+                        reply += (
+                            f"------------------------------------\n"
+                            f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
+                            f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})\n"
+                            f"💎 <b>Total Account Equity:</b> ${m['equity_usd']:.2f} ({m['equity_inr_str']})"
+                        )
                     telegram.send_message(reply)
 
                 elif text == "/rollstats":
@@ -736,23 +946,25 @@ def monitor_loop():
                 last_heartbeat_time = now
                 st = state_mgr.state
                 spot = StrategyEngine.get_spot()
-                bal = st["balance"]
-                pnl = bal - st["initial_capital"]
                 active_s = st.get("active_short")
+                m = StrategyEngine.get_current_metrics()
 
                 if active_s:
                     t_left = max(0.0, 24 - active_s.get("hours_held", 0)) / (365.0 * 24.0)
                     val = bs_put(spot, active_s["strike"], t_left) if active_s["type"] == "P" else bs_call(spot, active_s["strike"], t_left)
                     decay_pct = (1.0 - (val / active_s["entry_prem"])) * 100.0
-                    unrealized = (active_s["entry_prem"] - val) * CONFIG["CONTRACT_SIZE"]
+                    exp_str = active_s.get("expiry_display", get_cycle_target_expiry_display())
 
                     telegram.send_message(
                         f"⏱️ <b>LIVE HOURLY UPDATE</b>\n"
                         f"<b>BTC Spot:</b> ${spot:,.2f}\n"
                         f"<b>Active Short:</b> Strike ${active_s['strike']:,.0f} {active_s['type']}\n"
+                        f"📅 <b>Expiry:</b> {exp_str}\n"
                         f"<b>Decay Progress:</b> <b>{decay_pct:.1f}%</b> / 80% Target\n"
-                        f"<b>Unrealized Gain:</b> ${unrealized:+.2f}\n"
-                        f"<b>Total Balance:</b> ${bal:.2f} (${pnl:+.2f})"
+                        f"------------------------------------\n"
+                        f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
+                        f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})\n"
+                        f"💎 <b>Total Equity:</b> ${m['equity_usd']:.2f} ({m['equity_inr_str']})"
                     )
                 else:
                     telegram.send_message(
@@ -760,7 +972,9 @@ def monitor_loop():
                         f"<b>Status:</b> Online & Watching 1H Supertrend\n"
                         f"<b>BTC Spot:</b> ${spot:,.2f}\n"
                         f"<b>Current Trend:</b> {st.get('current_trend', 'None')}\n"
-                        f"<b>Total Balance:</b> ${bal:.2f} (${pnl:+.2f})"
+                        f"------------------------------------\n"
+                        f"📈 <b>Running Trade PnL:</b> $0.00 (₹0 INR)\n"
+                        f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
                     )
         except Exception as e:
             logger.error(f"Monitor error: {e}")
@@ -905,6 +1119,12 @@ def live_candle_autotrader_loop():
                                 f"<i>Processing trade automatically with zero subscriptions!</i>"
                             )
                             StrategyEngine.handle_signal(curr_1h, trend_4h=curr_4h)
+                        elif not state_mgr.state.get("active_short") and not state_mgr.state.get("active_longs"):
+                            if not is_in_settlement_window():
+                                logger.info(f"Settlement window complete (after 18:31 IST). Opening next cycle spread for {curr_1h}...")
+                                StrategyEngine.handle_signal(curr_1h, trend_4h=curr_4h)
+
+
 
         except Exception as e:
             logger.error(f"Error in autotrader loop: {e}")
