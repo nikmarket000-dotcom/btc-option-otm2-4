@@ -292,6 +292,26 @@ class StrategyEngine:
             opt_type = "C"
             spread_name = "🔴 BEAR CALL SPREAD"
 
+        # Fetch live market quotes from Delta Exchange if available
+        s_prod = None
+        l_prod = None
+        if delta_client:
+            try:
+                s_prod = delta_client.find_option(opt_type, s_strike)
+                l_prod = delta_client.find_option(opt_type, l_strike)
+                if s_prod:
+                    q_s = delta_client.get_ticker_quote(s_prod["symbol"])
+                    if q_s and q_s.get("mark_price", 0) > 0:
+                        s_prem = round(q_s["mark_price"], 2)
+                        logger.info(f"Using live Delta quote for Short {s_prod['symbol']}: ${s_prem}")
+                if l_prod:
+                    q_l = delta_client.get_ticker_quote(l_prod["symbol"])
+                    if q_l and q_l.get("mark_price", 0) > 0:
+                        l_prem = round(q_l["mark_price"], 2)
+                        logger.info(f"Using live Delta quote for Long {l_prod['symbol']}: ${l_prem}")
+            except Exception as e:
+                logger.error(f"Error fetching live Delta quotes: {e}")
+
         fees = calc_delta_fee(spot, s_prem, qty) + calc_delta_fee(spot, l_prem, qty)
         net_credit = s_prem - l_prem
         sl_trigger = round(s_prem * 2.0, 2)
@@ -299,6 +319,8 @@ class StrategyEngine:
         short_leg = {
             "type": opt_type,
             "strike": s_strike,
+            "product_symbol": s_prod["symbol"] if s_prod else None,
+            "product_id": s_prod["id"] if s_prod else None,
             "entry_prem": s_prem,
             "sl_trigger": sl_trigger,
             "entry_time": datetime.now(timezone.utc).isoformat(),
@@ -308,6 +330,8 @@ class StrategyEngine:
         long_leg = {
             "type": opt_type,
             "strike": l_strike,
+            "product_symbol": l_prod["symbol"] if l_prod else None,
+            "product_id": l_prod["id"] if l_prod else None,
             "entry_prem": l_prem,
             "entry_time": datetime.now(timezone.utc).isoformat(),
             "hours_held": 0
@@ -392,6 +416,15 @@ class StrategyEngine:
             else:
                 val = bs_call(spot, active_short["strike"], t_left)
 
+            # Live Delta mark price override if available
+            if delta_client and active_short.get("product_symbol"):
+                try:
+                    q_live = delta_client.get_ticker_quote(active_short["product_symbol"])
+                    if q_live and q_live.get("mark_price", 0) > 0:
+                        val = q_live["mark_price"]
+                except Exception:
+                    pass
+
             # Check 80% Take Profit
             tp_hit = val <= (active_short["entry_prem"] * (1.0 - CONFIG["TAKE_PROFIT_PCT"]))
             
@@ -461,12 +494,27 @@ class StrategyEngine:
                     new_prem = bs_call(spot, new_k, T_init)
                     roll_type = "C"
 
+                # Fetch real Delta quote for rolled strike if available
+                new_s_prod = None
+                if delta_client:
+                    try:
+                        new_s_prod = delta_client.find_option(roll_type, new_k)
+                        if new_s_prod:
+                            q_r = delta_client.get_ticker_quote(new_s_prod["symbol"])
+                            if q_r and q_r.get("mark_price", 0) > 0:
+                                new_prem = round(q_r["mark_price"], 2)
+                                logger.info(f"Using live Delta quote for Rolled Short {new_s_prod['symbol']}: ${new_prem}")
+                    except Exception as e:
+                        logger.error(f"Error quoting roll on Delta: {e}")
+
                 roll_fee = calc_delta_fee(spot, new_prem, qty)
                 rolled_count = st.get("rolled_count", 0) + 1
 
                 new_short = {
                     "type": roll_type,
                     "strike": new_k,
+                    "product_symbol": new_s_prod["symbol"] if new_s_prod else None,
+                    "product_id": new_s_prod["id"] if new_s_prod else None,
                     "entry_prem": new_prem,
                     "sl_trigger": round(new_prem * 2.0, 2),
                     "entry_time": datetime.now(timezone.utc).isoformat(),
