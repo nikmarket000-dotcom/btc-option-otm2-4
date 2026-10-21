@@ -103,9 +103,9 @@ CONFIG = {
     "RESERVE_BUFFER": float(os.getenv("RESERVE_BUFFER", 100.0)),            # $100 safety reserve
     "UNDERLYING": "BTC",               # BTC
     "CONTRACT_SIZE": 0.01,             # 0.01 BTC (10 micro-contracts on Delta)
-    "STRIKE_INTERVAL": float(os.getenv("STRIKE_INTERVAL", 200.0)),          # $200 strike interval on Delta (OTM 2 = +$400, OTM 4 = +$800)
+    "STRIKE_INTERVAL": float(os.getenv("STRIKE_INTERVAL", 200.0)),          # $200 strike interval on Delta (OTM 2 = +$400, OTM 8 = +$1600)
     "SHORT_OTM_STEP": 2,               # OTM 2 = 2 * $200 = $400 away
-    "LONG_OTM_STEP": 4,                # OTM 4 = 4 * $200 = $800 away
+    "LONG_OTM_STEP": 8,                # OTM 8 = 8 * $200 = $1600 away
     "TAKE_PROFIT_PCT": 0.80,           # 80% profit booking threshold
     "USE_4H_FILTER": True,             # 4-Hour Trend Confirmation Filter (Slashes Drawdown to 15.3% & saves $17 in fees!)
     "USD_TO_INR": float(os.getenv("USD_TO_INR", 85.0)), # USD to INR conversion rate for Delta India
@@ -114,10 +114,10 @@ CONFIG = {
     "BASKETS": {
         "basket_1": {
             "id": "basket_1",
-            "name": "Basket 1 (1H+4H Filter | OTM 2/4)",
+            "name": "Basket 1 (1H+4H Filter | OTM 2/8)",
             "use_4h_filter": True,
             "short_otm_step": 2,  # OTM 2 = $400 away
-            "long_otm_step": 4,   # OTM 4 = $800 away
+            "long_otm_step": 8,   # OTM 8 = $1600 away
             "contract_size": 0.01,
         },
         "basket_2": {
@@ -263,11 +263,11 @@ class StateManager:
         if "baskets" not in st or not isinstance(st["baskets"], dict):
             st["baskets"] = {}
 
-        # Basket 1: 1H + 4H Confirmed (OTM 2/4)
+        # Basket 1: 1H + 4H Confirmed (OTM 2/8)
         if "basket_1" not in st["baskets"]:
             st["baskets"]["basket_1"] = {
                 "id": "basket_1",
-                "name": "Basket 1 (1H+4H Filter | OTM 2/4)",
+                "name": "Basket 1 (1H+4H Filter | OTM 2/8)",
                 "current_trend": st.get("current_trend"),
                 "active_short": st.get("active_short"),
                 "active_longs": st.get("active_longs", []),
@@ -998,7 +998,7 @@ def telegram_polling_worker():
                         f"💵 <b>Net Account Balance:</b> ${bal:.2f}{inr_str}\n"
                         f"💎 <b>Total Account Equity:</b> ${m['equity_usd']:.2f} ({m['equity_inr_str']})\n"
                         f"------------------------------------\n"
-                        f"📦 <b>Basket 1 (1H+4H Confirmed | OTM 2/4):</b>\n"
+                        f"📦 <b>Basket 1 (1H+4H Confirmed | OTM 2/8):</b>\n"
                         f"   • Trend: <b>{b1_trend}</b> | Running PnL: <b>${b1_info.get('running_pnl_usd', 0):+.2f}</b>\n"
                         f"📦 <b>Basket 2 (Pure 1H Fast | OTM 2/8):</b>\n"
                         f"   • Trend: <b>{b2_trend}</b> | Running PnL: <b>${b2_info.get('running_pnl_usd', 0):+.2f}</b>\n"
