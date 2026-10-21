@@ -1138,19 +1138,39 @@ def telegram_polling_worker():
 
                 if text in ["/start", "/help"]:
                     reply = (
-                        "🤖 <b>1H Supertrend Options Paper Bot</b>\n\n"
+                        "🤖 <b>1H Supertrend Options Bot (Delta Demo Execution)</b>\n\n"
                         "<b>Available Commands:</b>\n"
-                        "/balance or /status — Current account equity & PnL\n"
-                        "/positions — Active short and long legs\n"
+                        "/status or /positions — Combined status for Basket 1 & Basket 2\n"
+                        "/trade — Check live candles & open fresh trades on Delta Demo\n"
+                        "/reset — Clear state & reset to flat\n"
+                        "/market — View live 1H and 4H Supertrend directions\n"
                         "/rollstats — 80% profit book and roll counts\n"
-                        "/setspot &lt;price&gt; — Update simulated BTC spot (e.g. /setspot 66500)\n"
-                        "/signal &lt;BULLISH|BEARISH&gt; — Test trigger a manual trend flip"
+                        "/signal &lt;BULLISH|BEARISH&gt; — Manual signal trigger"
                     )
                     telegram.send_message(reply)
 
                 elif text in ["/balance", "/status", "/positions"]:
                     reply = StrategyEngine.format_combined_baskets_alert()
                     telegram.send_message(reply)
+
+                elif text == "/trade":
+                    c1 = fetch_live_klines("1h", 30)
+                    c4 = fetch_live_klines("4h", 30)
+                    if c1 and c4:
+                        d1 = "BULLISH" if calculate_supertrend(c1)[-1] == 1 else "BEARISH"
+                        d4 = "BULLISH" if calculate_supertrend(c4)[-1] == 1 else "BEARISH"
+                        p = c1[-1]['close']
+                        StrategyEngine.set_spot(p)
+                        StrategyEngine.handle_signal(d1, trend_4h=d4)
+                        telegram.send_message(f"⚡ <b>Evaluating Live Trade:</b> 1H {d1} | 4H {d4} | Spot ${p:,.2f}")
+                    else:
+                        telegram.send_message("❌ Failed to fetch live market candles.")
+
+                elif text == "/reset":
+                    for b_id in CONFIG.get("BASKETS", {}).keys():
+                        state_mgr.update_basket(b_id, active_short=None, active_longs=[], hedge_legs=[], current_trend=None)
+                    state_mgr.update(active_short=None, active_longs=[], hedge_legs=[], current_trend=None)
+                    telegram.send_message("🔄 <b>State Reset Complete!</b> All positions cleared. Bot is flat and ready for fresh trades.")
 
                 elif text == "/rollstats":
                     reply = (

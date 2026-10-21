@@ -1,0 +1,10 @@
+{
+  "total_capital": 50.0,
+  "active_capital": 30.0,
+  "reserve_buffer": 20.0,
+  "realized_pnl": 0.0,
+  "total_fees": 0.0,
+  "active_strangle": null,
+  "completed_cycles": [],
+  "last_entry_date": null
+}
