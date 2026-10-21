@@ -55,11 +55,15 @@ logging.basicConfig(
 logger = logging.getLogger("TelegramPaperBot")
 
 # --- DELTA EXCHANGE TESTNET CONNECTOR ---
+DELTA_API_KEY = os.getenv("DELTA_API_KEY", "BDERFCaZsygWC8X41ptfTZIm22iTqA")
+DELTA_API_SECRET = os.getenv("DELTA_API_SECRET", "mQzIZP9BuMJs8o37DbDDIFfkl6AGHuDBvPVRZuloUraHen6SXPWzKc9zPtWJ")
+DELTA_BASE_URL = os.getenv("DELTA_BASE_URL", "https://api.testnet.deltaex.org")
+
 delta_client = None
-if os.getenv("DELTA_API_KEY"):
+if DELTA_API_KEY:
     try:
         from delta_client import DeltaClient
-        delta_client = DeltaClient()
+        delta_client = DeltaClient(api_key=DELTA_API_KEY, api_secret=DELTA_API_SECRET, base_url=DELTA_BASE_URL)
         logger.info("Delta Exchange India Testnet Client Initialized ✅")
     except Exception as e:
         logger.warning(f"DeltaClient not loaded: {e}")
@@ -164,7 +168,7 @@ CONFIG = {
     "AUTO_POLL_INTERVAL_SECONDS": 45,  # Checks live exchange candles every 45s
     
     # Telegram Bot Settings
-    "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", "8738017140:AAEx4COFhEC-2wfxFlGaEPAx8xUFtV8oEEU"),
+    "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", "8272565065:AAEVa22kCFQmV66DBHjcFstpDe9t6dZV5_U"),
     "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", "857206681"),
     
     # State Persistence

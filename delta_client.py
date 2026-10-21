@@ -65,8 +65,8 @@ load_env_file()
 
 class DeltaClient:
     def __init__(self, api_key=None, api_secret=None, base_url=None):
-        self.api_key = api_key or os.getenv("DELTA_API_KEY", "")
-        self.api_secret = api_secret or os.getenv("DELTA_API_SECRET", "")
+        self.api_key = api_key or os.getenv("DELTA_API_KEY", "BDERFCaZsygWC8X41ptfTZIm22iTqA")
+        self.api_secret = api_secret or os.getenv("DELTA_API_SECRET", "mQzIZP9BuMJs8o37DbDDIFfkl6AGHuDBvPVRZuloUraHen6SXPWzKc9zPtWJ")
         self.base_url = base_url or os.getenv("DELTA_BASE_URL", "https://api.testnet.deltaex.org")
         self.ctx = ssl._create_unverified_context()
 
