@@ -1,0 +1,153 @@
+//@version=5
+indicator("BTC 1H Supertrend + 4H Filter [Delta Options Bot (OTM 6 & 8)]", overlay=true)
+
+// ==============================================================================
+// 1. INPUT CONFIGURATION
+// ==============================================================================
+grp_st       = "Supertrend Settings"
+atrPeriod    = input.int(10, "ATR Period (Length)", minval=1, group=grp_st)
+factor       = input.float(3.0, "Supertrend Multiplier", minval=0.1, step=0.1, group=grp_st)
+
+grp_filter   = "4-Hour Macro Trend Filter"
+use4hFilter  = input.bool(true, "Enable 4H Trend Confirmation Filter", group=grp_filter)
+res_macro    = input.timeframe("240", "Macro Timeframe", group=grp_filter)
+
+grp_strikes  = "Delta Exchange Strike Spacing"
+strikeStep   = input.float(200.0, "Delta Strike Interval ($)", step=50.0, group=grp_strikes)
+shortStep    = input.int(2, "Short Leg OTM (OTM 2 = $400 door)", minval=1, group=grp_strikes)
+longStep6    = input.int(6, "Long Leg Option 1 (OTM 6 = $1200 door)", minval=2, group=grp_strikes)
+longStep8    = input.int(8, "Long Leg Option 2 (OTM 8 = $1600 door)", minval=2, group=grp_strikes)
+
+grp_visual   = "Chart Visuals & Line Display"
+show4hLine   = input.bool(true, "Show 4H Macro Supertrend Line", group=grp_visual)
+show1hLine   = input.bool(true, "Show 1H Fast Supertrend Line", group=grp_visual)
+showLevels   = input.bool(true, "Show Strike Price Levels on Chart", group=grp_visual)
+activeChoice = input.string("OTM 6 (Recommended)", "Primary Spread for Alerts", options=["OTM 6 (Recommended)", "OTM 8 (Max Credit)"], group=grp_visual)
+
+grp_colors   = "Supertrend Line Colors"
+col_4h_bull  = input.color(#00e676, "4H Bullish Color (ONLY Green when Bullish)", group=grp_colors)
+col_4h_bear  = input.color(#ff1744, "4H Bearish Color (ONLY Red when Bearish)", group=grp_colors)
+col_1h_bull  = input.color(#2962ff, "1H Bullish Color", group=grp_colors)
+col_1h_bear  = input.color(#e91e63, "1H Bearish Color", group=grp_colors)
+
+grp_alert    = "Webhook / Alert Token"
+webhookToken = input.string("SUPER_TREND_SECRET_123", "Secret Token", group=grp_alert)
+
+// ==============================================================================
+// 2. 1H SUPERTREND CALCULATION
+// ==============================================================================
+[st_1h, dir_1h] = ta.supertrend(factor, atrPeriod)
+isBull_1h = dir_1h < 0
+isBear_1h = dir_1h > 0
+
+bullFlip_1h = isBull_1h and dir_1h[1] > 0
+bearFlip_1h = isBear_1h and dir_1h[1] < 0
+
+// ==============================================================================
+// 3. 4H MACRO SUPERTREND CALCULATION (Higher Timeframe Security)
+// ==============================================================================
+[st_4h, dir_4h] = request.security(syminfo.tickerid, res_macro, ta.supertrend(factor, atrPeriod), barmerge.gaps_off, barmerge.lookahead_off)
+isBull_4h = dir_4h < 0
+isBear_4h = dir_4h > 0
+
+trend_4h_str = isBull_4h ? "BULLISH" : "BEARISH"
+
+// Filter Logic: Signal is valid ONLY when 1H and 4H agree (or filter is disabled)
+validBullSignal = bullFlip_1h and (not use4hFilter or isBull_4h)
+validBearSignal = bearFlip_1h and (not use4hFilter or isBear_4h)
+
+// Blocked / Filtered Signals (1H flipped but 4H was opposite)
+filteredBull = bullFlip_1h and (use4hFilter and not isBull_4h)
+filteredBear = bearFlip_1h and (use4hFilter and not isBear_4h)
+
+// ==============================================================================
+// 4. STRIKE CALCULATIONS (OTM 2 Short, OTM 6 Long, OTM 8 Long)
+// ==============================================================================
+atmPrice = math.round(close / strikeStep) * strikeStep
+shortK   = isBull_1h ? (atmPrice - shortStep * strikeStep) : (atmPrice + shortStep * strikeStep)
+longK_6  = isBull_1h ? (atmPrice - longStep6 * strikeStep) : (atmPrice + longStep6 * strikeStep)
+longK_8  = isBull_1h ? (atmPrice - longStep8 * strikeStep) : (atmPrice + longStep8 * strikeStep)
+
+optType  = isBull_1h ? "PUT" : "CALL"
+stratName= isBull_1h ? "Bull Put Spread" : "Bear Call Spread"
+
+// Primary Choice for Webhook
+chosenLongK = (activeChoice == "OTM 6 (Recommended)") ? longK_6 : longK_8
+chosenStep  = (activeChoice == "OTM 6 (Recommended)") ? 6 : 8
+
+// ==============================================================================
+// 5. PLOTTING SUPERTREND LINES & STRIKE LEVELS
+// ==============================================================================
+// 4H Macro Supertrend (STRICT: Bullish = ONLY Green, Bearish = ONLY Red)
+// style_linebr ensures that when a condition is false (na), the line breaks immediately without any leftover/ghost line!
+p_st4_bull = plot(show4hLine and isBull_4h ? st_4h : na, "4H Bullish Support (Macro)", color=col_4h_bull, linewidth=3, style=plot.style_linebr)
+p_st4_bear = plot(show4hLine and isBear_4h ? st_4h : na, "4H Bearish Resistance (Macro)", color=col_4h_bear, linewidth=3, style=plot.style_linebr)
+
+// 1H Fast Supertrend (LOWER / FAST LAYER)
+p_st1_bull = plot(show1hLine and isBull_1h ? st_1h : na, "1H Bull Support", color=col_1h_bull, linewidth=2, style=plot.style_linebr)
+p_st1_bear = plot(show1hLine and isBear_1h ? st_1h : na, "1H Bear Resistance", color=col_1h_bear, linewidth=2, style=plot.style_linebr)
+
+p_close = plot(close, "Close Price", color=color.new(color.gray, 90), display=display.none)
+fill(p_close, p_st1_bull, color=color.new(col_1h_bull, 94), title="1H Bullish Cloud")
+fill(p_close, p_st1_bear, color=color.new(col_1h_bear, 94), title="1H Bearish Cloud")
+
+// Signal Shapes on Chart
+plotshape(validBullSignal, title="Valid Bull Spread Entry", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.normal, text="🟢 BUY PUT SPREAD\n(4H+1H Confirmed)")
+plotshape(validBearSignal, title="Valid Bear Spread Entry", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.normal, text="🔴 SELL CALL SPREAD\n(4H+1H Confirmed)")
+
+// Filtered Out Fakeout Shapes (Orange Cross)
+plotshape(filteredBull, title="Blocked Bullish (4H Bearish)", style=shape.xcross, location=location.belowbar, color=color.orange, size=size.small, text="Filtered\n(4H Bearish)")
+plotshape(filteredBear, title="Blocked Bearish (4H Bullish)", style=shape.xcross, location=location.abovebar, color=color.orange, size=size.small, text="Filtered\n(4H Bullish)")
+
+// Live Strike Level Lines (Yellow = Short, Aqua = OTM 6 Long, Fuchsia = OTM 8 Long)
+plot(showLevels ? shortK : na, "Short Strike (OTM 2)", color=color.new(color.yellow, 20), linewidth=1, style=plot.style_circles)
+plot(showLevels ? longK_6 : na, "Long Strike (OTM 6)", color=color.new(color.aqua, 20), linewidth=1, style=plot.style_linebr)
+plot(showLevels ? longK_8 : na, "Long Strike (OTM 8)", color=color.new(color.fuchsia, 30), linewidth=1, style=plot.style_linebr)
+
+// ==============================================================================
+// 6. LIVE DASHBOARD TABLE ON CHART (Top-Right)
+// ==============================================================================
+var table dash = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 15), border_color=color.gray, border_width=1)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "⚡ Dual-Basket Strategy", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 40))
+    table.cell(dash, 1, 0, "Next-Day Expiry (17:30 IST)", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.blue, 40))
+
+    // ROW 1: 4H Macro Trend (UPAR / ON TOP)
+    table.cell(dash, 0, 1, "4H Macro Supertrend (Top)", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, isBull_4h ? "🟢 4H BULLISH" : "🔴 4H BEARISH", text_color=isBull_4h ? col_4h_bull : col_4h_bear, text_size=size.small, bgcolor=isBull_4h ? color.new(color.green, 85) : color.new(color.red, 85))
+
+    // ROW 2: 1H Fast Trend (NICHE / BELOW)
+    table.cell(dash, 0, 2, "1H Fast Supertrend (Below)", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, isBull_1h ? "🟢 1H BULLISH" : "🔴 1H BEARISH", text_color=isBull_1h ? col_1h_bull : col_1h_bear, text_size=size.small, bgcolor=isBull_1h ? color.new(color.green, 85) : color.new(color.red, 85))
+
+    // ROW 3: Alignment Check
+    isAligned = isBull_1h == isBull_4h
+    table.cell(dash, 0, 3, "Trend Alignment", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, isAligned ? "✅ MATCHED" : "⏸️ CONFLICT (4H Filter Active)", text_color=isAligned ? color.green : color.orange, text_size=size.small, bgcolor=isAligned ? color.new(color.green, 90) : color.new(color.orange, 90))
+
+    // ROW 4: Basket 1 (1H + 4H Confirmed | OTM 2/6)
+    table.cell(dash, 0, 4, "📦 Basket 1: 1H+4H Filter (OTM 2/6)", text_color=color.white, text_size=size.small)
+    b1_status = isAligned ? ("✅ ACTIVE (" + stratName + ")\nSell $" + str.tostring(shortK, "#") + " / Buy $" + str.tostring(longK_6, "#") + "\n[Margin: ~$8.00]") : "⏸️ BLOCKED (Waiting for 4H)"
+    table.cell(dash, 1, 4, b1_status, text_color=isAligned ? color.aqua : color.gray, text_size=size.small, bgcolor=isAligned ? color.new(color.teal, 85) : color.new(color.black, 30))
+
+    // ROW 5: Basket 2 (Pure 1H Fast | OTM 2/8)
+    table.cell(dash, 0, 5, "📦 Basket 2: Pure 1H (OTM 2/8)", text_color=color.white, text_size=size.small)
+    b2_status = "✅ ACTIVE (" + stratName + ")\nSell $" + str.tostring(shortK, "#") + " / Buy $" + str.tostring(longK_8, "#") + "\n[Margin: ~$12.00 | Max Credit]"
+    table.cell(dash, 1, 5, b2_status, text_color=color.fuchsia, text_size=size.small, bgcolor=color.new(color.purple, 85))
+
+    // ROW 6: Expiry Info
+    table.cell(dash, 0, 6, "Delta Settlement Cycle", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, "Daily 17:30 IST (Next-Day)\nBuffer: 17:30-18:30 IST", text_color=color.yellow, text_size=size.small)
+
+// ==============================================================================
+// 7. TRADINGVIEW WEBHOOK ALERTS
+// ==============================================================================
+if validBullSignal
+    alert('{"token": "' + webhookToken + '", "signal": "BULLISH", "trend_4h": "' + trend_4h_str + '", "spot": ' + str.tostring(close) + ', "short_k": ' + str.tostring(shortK) + ', "long_k": ' + str.tostring(chosenLongK) + '}', alert.freq_once_per_bar_close)
+
+if validBearSignal
+    alert('{"token": "' + webhookToken + '", "signal": "BEARISH", "trend_4h": "' + trend_4h_str + '", "spot": ' + str.tostring(close) + ', "short_k": ' + str.tostring(shortK) + ', "long_k": ' + str.tostring(chosenLongK) + '}', alert.freq_once_per_bar_close)
+
+alertcondition(validBullSignal, title="Alert: Bull Put Spread (4H Confirmed)", message="BULL PUT SPREAD: 1H & 4H Trend Bullish Confirmed")
+alertcondition(validBearSignal, title="Alert: Bear Call Spread (4H Confirmed)", message="BEAR CALL SPREAD: 1H & 4H Trend Bearish Confirmed")
