@@ -67,7 +67,7 @@ class DeltaClient:
     def __init__(self, api_key=None, api_secret=None, base_url=None):
         self.api_key = api_key or os.getenv("DELTA_API_KEY", "")
         self.api_secret = api_secret or os.getenv("DELTA_API_SECRET", "")
-        self.base_url = base_url or os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
+        self.base_url = base_url or os.getenv("DELTA_BASE_URL", "https://api.testnet.deltaex.org")
         self.ctx = ssl._create_unverified_context()
 
     def _sign_request(self, method, path, query_string="", payload=""):
@@ -86,27 +86,51 @@ class DeltaClient:
         qs = ""
         if query_params:
             qs = "?" + urllib.parse.urlencode(query_params)
-        url = self.base_url + path + qs
         payload_str = json.dumps(body) if body else ""
-
-        headers = self._sign_request(method, path, qs, payload_str) if auth else {
-            "User-Agent": "DeltaBot/1.0",
-            "Content-Type": "application/json"
-        }
-
         data_bytes = payload_str.encode("utf-8") if body else None
-        req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
 
-        try:
-            with urllib.request.urlopen(req, context=self.ctx, timeout=8) as res:
-                return json.loads(res.read().decode("utf-8"))
-        except urllib.error.HTTPError as he:
-            err_body = he.read().decode("utf-8") if hasattr(he, "read") else ""
-            logger.error(f"Delta API HTTP {he.code} on {path}: {err_body}")
-            return {"success": False, "error": err_body, "code": he.code}
-        except Exception as e:
-            logger.error(f"Delta API Exception on {path}: {e}")
-            return {"success": False, "error": str(e)}
+        # Build candidate base URLs (avoid CDN for authenticated / POST requests)
+        candidate_bases = [self.base_url]
+        if auth or method == "POST":
+            is_testnet = "testnet" in self.base_url or "demo" in self.base_url
+            api_fallbacks = ["https://api.testnet.deltaex.org", "https://api.testnet.delta.exchange"] if is_testnet else ["https://api.india.delta.exchange", "https://api.delta.exchange"]
+            cleaned = []
+            for b in candidate_bases:
+                c_clean = b.replace("cdn-ind.", "api.").replace("cdn.", "api.")
+                if c_clean not in cleaned:
+                    cleaned.append(c_clean)
+            for fb in api_fallbacks:
+                if fb not in cleaned:
+                    cleaned.append(fb)
+            candidate_bases = cleaned
+
+        last_error = "Unknown error"
+        last_code = 500
+
+        for b_url in candidate_bases:
+            url = b_url + path + qs
+            headers = self._sign_request(method, path, qs, payload_str) if auth else {
+                "User-Agent": "DeltaBot/1.0",
+                "Content-Type": "application/json"
+            }
+            req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, context=self.ctx, timeout=8) as res:
+                    return json.loads(res.read().decode("utf-8"))
+            except urllib.error.HTTPError as he:
+                err_body = he.read().decode("utf-8") if hasattr(he, "read") else ""
+                last_error = err_body
+                last_code = he.code
+                if he.code == 403 or "not allowed by policy" in err_body:
+                    continue  # Try next candidate API domain
+                logger.error(f"Delta API HTTP {he.code} on {path}: {err_body}")
+                return {"success": False, "error": err_body, "code": he.code}
+            except Exception as e:
+                last_error = str(e)
+                continue
+
+        logger.error(f"Delta API Exception across endpoints on {path}: {last_error}")
+        return {"success": False, "error": str(last_error), "code": last_code}
 
     def get_wallet_balances(self):
         """Fetches wallet balances (USD/INR/BTC)."""
@@ -186,10 +210,11 @@ class DeltaClient:
 
         return self._request("POST", "/v2/orders", body=body, auth=True)
 
-    def find_option(self, opt_type, target_strike, target_date=None, min_hours=1, max_hours=48):
+    def find_option(self, opt_type, target_strike, target_date=None, min_strike=None, max_strike=None, min_hours=1, max_hours=48):
         """
         Finds the closest option contract matching target_strike and opt_type ('C' or 'P').
         Strictly matches the target cycle expiry date code (DDMMYY) so all contracts in a cycle expire together.
+        Ensures strikes obey min_strike and max_strike constraints so wings never duplicate short legs.
         """
         if not target_date:
             target_date = get_cycle_target_date_code()
@@ -215,6 +240,11 @@ class DeltaClient:
                 continue
 
             strike = float(t.get("strike_price", 0))
+            if min_strike is not None and strike < min_strike:
+                continue
+            if max_strike is not None and strike > max_strike:
+                continue
+
             diff = abs(strike - target_strike)
             candidates.append((diff, h_left, {
                 "id": t.get("product_id"),

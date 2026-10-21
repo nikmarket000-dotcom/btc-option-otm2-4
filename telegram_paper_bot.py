@@ -95,6 +95,29 @@ def is_in_settlement_window():
     end_buffer = now_ist.replace(hour=18, minute=31, second=0, microsecond=0)
     return start_buffer <= now_ist < end_buffer
 
+def get_current_ist_str():
+    """Returns current date and time in IST formatted nicely, e.g. '21-Oct-2026 17:35:10 IST'"""
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc + timedelta(hours=5, minutes=30)
+    return now_ist.strftime("%d-%b-%Y %H:%M:%S IST")
+
+def place_order_verified(client, product_id, size, side, order_note=""):
+    """Places real / testnet order on Delta Exchange with logging and error reporting."""
+    if not client or not product_id:
+        return False, None, "Client or product_id missing"
+    try:
+        res = client.place_order(product_id=int(product_id), size=int(size), side=side.lower(), order_type="market_order")
+        if isinstance(res, dict) and res.get("success") is True:
+            order_info = res.get("result", {})
+            logger.info(f"✅ Delta Demo Order SUCCESS [{order_note}]: side={side}, size={size}, prod_id={product_id}")
+            return True, order_info, None
+        err_msg = json.dumps(res) if isinstance(res, dict) else str(res)
+        logger.error(f"❌ Delta Demo Order FAILED [{order_note}]: {err_msg}")
+        return False, None, err_msg
+    except Exception as e:
+        logger.error(f"❌ Delta Demo Order EXCEPTION [{order_note}]: {e}")
+        return False, None, str(e)
+
 # --- CONFIGURATION ---
 CONFIG = {
     # Account & Trading
@@ -103,6 +126,7 @@ CONFIG = {
     "RESERVE_BUFFER": float(os.getenv("RESERVE_BUFFER", 100.0)),            # $100 safety reserve
     "UNDERLYING": "BTC",               # BTC
     "CONTRACT_SIZE": 0.01,             # 0.01 BTC (10 micro-contracts on Delta)
+    "LOTS_PER_BASKET": int(os.getenv("LOTS_PER_BASKET", 10)), # 10 contracts on Delta
     "STRIKE_INTERVAL": float(os.getenv("STRIKE_INTERVAL", 200.0)),          # $200 strike interval on Delta (OTM 2 = +$400, OTM 8 = +$1600)
     "SHORT_OTM_STEP": 2,               # OTM 2 = 2 * $200 = $400 away
     "LONG_OTM_STEP": 8,                # OTM 8 = 8 * $200 = $1600 away
@@ -119,14 +143,16 @@ CONFIG = {
             "short_otm_step": 2,  # OTM 2 = $400 away
             "long_otm_step": 8,   # OTM 8 = $1600 away
             "contract_size": 0.01,
+            "lots": 10,
         },
         "basket_2": {
             "id": "basket_2",
-            "name": "Basket 2 (Pure 1H Fast | OTM 2/8)",
+            "name": "Basket 2 (1H Filter | OTM 2/8)",
             "use_4h_filter": False,  # Follows ONLY 1H - No 4H filter!
             "short_otm_step": 2,  # OTM 2 = $400 away
             "long_otm_step": 8,   # OTM 8 = $1600 away
             "contract_size": 0.01,
+            "lots": 10,
         }
     },
     
@@ -282,7 +308,7 @@ class StateManager:
         if "basket_2" not in st["baskets"]:
             st["baskets"]["basket_2"] = {
                 "id": "basket_2",
-                "name": "Basket 2 (Pure 1H Fast | OTM 2/8)",
+                "name": "Basket 2 (1H Filter | OTM 2/8)",
                 "current_trend": None,
                 "active_short": None,
                 "active_longs": [],
@@ -486,8 +512,153 @@ class StrategyEngine:
         }
 
     @classmethod
+    def build_basket_card(cls, basket_id, b_conf, b_st, spot, current_time_str, trend_1h, trend_4h):
+        b_name = b_conf.get("name", f"Basket ({basket_id})")
+        s = b_st.get("active_short")
+        longs = b_st.get("active_longs", [])
+        l = longs[0] if longs else None
+        qty = b_conf.get("contract_size", CONFIG["CONTRACT_SIZE"])
+        short_step = b_conf.get("short_otm_step", 2)
+        long_step = b_conf.get("long_otm_step", 8)
+
+        st_info = f"4h {trend_4h.lower()}/ 1h {trend_1h.lower()}"
+
+        if not s or not l:
+            if b_conf.get("use_4h_filter", False) and trend_1h != trend_4h:
+                strat_line = f"Strategy: ⏸️ WAITING FOR 4H FILTER.  {st_info}"
+                status_text = f"1H is {trend_1h.lower()}, waiting for 4H {trend_4h.lower()} confirmation"
+            else:
+                strat_line = f"Strategy: ⏸️ STANDBY.  {st_info}"
+                status_text = "Waiting for next entry signal"
+
+            return (
+                f"{b_name}\n\n"
+                f"{strat_line}\n\n"
+                f"Status: {status_text}\n"
+                f"BTC current Spot: ${spot:,.2f}\n"
+                f"time : {current_time_str}\n\n"
+                f"Running Trade PnL : $0.00 (₹0 INR)"
+            )
+
+        opt_type = s.get("type", "P")
+        opt_name = "BULL PUT SPREAD" if opt_type == "P" else "BEAR CALL SPREAD"
+        strat_icon = "🟢" if opt_type == "P" else "🔴"
+        spread_name = f"{strat_icon} {opt_name} (OTM {short_step} / OTM {long_step}).  {st_info}"
+
+        entry_spot = s.get("entry_spot") or b_st.get("entry_spot") or spot
+        entry_time_ist = s.get("entry_time_ist") or b_st.get("entry_time_ist") or current_time_str
+        expiry_disp = s.get("expiry_display") or get_cycle_target_expiry_display()
+
+        now_utc = datetime.now(timezone.utc)
+        t_left = 0.0001
+        if s.get("expiry_code"):
+            try:
+                exp_dt = datetime.strptime(s["expiry_code"], "%d%m%y").replace(hour=12, minute=0, second=0, tzinfo=timezone.utc)
+                t_left = max(1.0, (exp_dt - now_utc).total_seconds()) / (365.0 * 24.0 * 3600.0)
+            except Exception:
+                t_left = max(0.0001, 24.0 - s.get("hours_held", 0)) / (365.0 * 24.0)
+
+        s_curr_prem = bs_put(spot, s["strike"], t_left) if opt_type == "P" else bs_call(spot, s["strike"], t_left)
+        l_curr_prem = bs_put(spot, l["strike"], t_left) if opt_type == "P" else bs_call(spot, l["strike"], t_left)
+
+        if delta_client:
+            if s.get("product_symbol"):
+                try:
+                    q = delta_client.get_ticker_quote(s["product_symbol"])
+                    if q and q.get("mark_price", 0) > 0:
+                        s_curr_prem = q["mark_price"]
+                except Exception:
+                    pass
+            if l.get("product_symbol"):
+                try:
+                    q = delta_client.get_ticker_quote(l["product_symbol"])
+                    if q and q.get("mark_price", 0) > 0:
+                        l_curr_prem = q["mark_price"]
+                except Exception:
+                    pass
+
+        s_entry = s.get("entry_prem", 0.0)
+        l_entry = l.get("entry_prem", 0.0)
+
+        pnl_short = (s_entry - s_curr_prem) * qty
+        pnl_long = (l_curr_prem - l_entry) * qty
+        pnl_hedge = 0.0
+        for h in b_st.get("hedge_legs", []):
+            h_curr = bs_put(spot, h["strike"], t_left) if h.get("type") == "P" else bs_call(spot, h["strike"], t_left)
+            pnl_hedge += (h_curr - h.get("entry_prem", 0.0)) * qty
+
+        basket_pnl = pnl_short + pnl_long + pnl_hedge
+        usd_to_inr = CONFIG.get("USD_TO_INR", 85.0)
+        basket_pnl_inr = basket_pnl * usd_to_inr
+        pnl_str = f"${basket_pnl:+.2f} ({basket_pnl_inr:+,.0f} INR)"
+
+        return (
+            f"{b_name}\n\n"
+            f"Strategy: {spread_name}\n\n"
+            f"buying sport : ${entry_spot:,.2f}\n"
+            f"time : {entry_time_ist}\n\n"
+            f"Expiry: {expiry_disp}\n\n"
+            f"BTC current Spot: ${spot:,.2f}\n"
+            f"time : {current_time_str}\n\n"
+            f"taken trade value:\n"
+            f"Sell {opt_type}: Strike ${s['strike']:,.0f} @ ${s_entry:.2f}\n"
+            f"Buy {opt_type}: Strike ${l['strike']:,.0f} @ ${l_entry:.2f}\n\n"
+            f"current trade value:\n"
+            f"Sell {opt_type}: Strike ${s['strike']:,.0f} @ ${s_curr_prem:.2f}\n"
+            f"Buy {opt_type}: Strike ${l['strike']:,.0f} @ ${l_curr_prem:.2f}\n\n"
+            f"Running Trade PnL : {pnl_str}"
+        )
+
+    @classmethod
+    def format_combined_baskets_alert(cls, trigger_reason=None):
+        st = state_mgr.state
+        spot = cls.get_spot()
+        curr_time_str = get_current_ist_str()
+        trend_4h = st.get("trend_4h", "BULLISH")
+        trend_1h = st.get("current_trend", "BULLISH")
+
+        baskets_conf = CONFIG.get("BASKETS", {})
+        b1_conf = baskets_conf.get("basket_1", {})
+        b2_conf = baskets_conf.get("basket_2", {})
+
+        b1_st = st.get("baskets", {}).get("basket_1", {})
+        b2_st = st.get("baskets", {}).get("basket_2", {})
+
+        card1 = cls.build_basket_card("basket_1", b1_conf, b1_st, spot, curr_time_str, trend_1h, trend_4h)
+        card2 = cls.build_basket_card("basket_2", b2_conf, b2_st, spot, curr_time_str, trend_1h, trend_4h)
+
+        bal = st.get("balance", CONFIG["STARTING_CAPITAL"])
+        if delta_client:
+            try:
+                w = delta_client.get_wallet_balances()
+                if w.get("success") and float(w.get("available_usd", 0)) > 0:
+                    bal = float(w.get("available_usd", bal))
+            except Exception:
+                pass
+
+        usd_to_inr = CONFIG.get("USD_TO_INR", 85.0)
+        bal_inr = bal * usd_to_inr
+
+        header = f"⚡ <b>{trigger_reason}</b>\n\n" if trigger_reason else ""
+
+        msg = (
+            f"{header}"
+            f"{card1}\n\n"
+            f"------------------------------------\n\n"
+            f"{card2}\n\n"
+            f"------------------------------------\n"
+            f"account balance : ${bal:,.2f} ({bal_inr:,.0f} INR)"
+        )
+        return msg
+
+    @classmethod
+    def send_combined_baskets_alert(cls, trigger_reason=None):
+        msg = cls.format_combined_baskets_alert(trigger_reason)
+        telegram.send_message(msg)
+
+    @classmethod
     def handle_signal(cls, signal, trend_4h=None, target_basket_id=None):
-        """Processes 1H Supertrend signal across configured dual baskets."""
+        """Processes 1H Supertrend signal across configured dual baskets and sends combined alert."""
         st = state_mgr.state
         signal = signal.upper().strip()
 
@@ -500,6 +671,7 @@ class StrategyEngine:
         logger.info(f"Signal received: {signal} | 4H Trend: {trend_4h}")
 
         baskets_to_process = [target_basket_id] if target_basket_id else list(CONFIG.get("BASKETS", {}).keys())
+        any_opened = False
 
         for b_id in baskets_to_process:
             b_conf = CONFIG["BASKETS"].get(b_id)
@@ -528,7 +700,11 @@ class StrategyEngine:
                 continue
 
             state_mgr.update_basket(b_id, current_trend=signal)
-            cls.open_fresh_spread(signal, basket_id=b_id)
+            if cls.open_fresh_spread(signal, basket_id=b_id):
+                any_opened = True
+
+        if any_opened:
+            cls.send_combined_baskets_alert(trigger_reason=f"NEW ENTRY SIGNAL ({signal})")
 
     @classmethod
     def open_fresh_spread(cls, signal, basket_id="basket_1"):
@@ -539,13 +715,14 @@ class StrategyEngine:
         interval = CONFIG["STRIKE_INTERVAL"]
         atm = round(spot / interval) * interval
         qty = b_conf.get("contract_size", CONFIG["CONTRACT_SIZE"])
+        lots = b_conf.get("lots", CONFIG.get("LOTS_PER_BASKET", 10))
         T_init = 24.0 / (365.0 * 24.0)
 
         target_date_code = get_cycle_target_date_code()
         target_expiry_disp = get_cycle_target_expiry_display()
 
         short_step = b_conf.get("short_otm_step", 2)
-        long_step = b_conf.get("long_otm_step", 4)
+        long_step = b_conf.get("long_otm_step", 8)
 
         if signal == "BULLISH":
             s_strike = atm - (short_step * interval)
@@ -582,16 +759,36 @@ class StrategyEngine:
             except Exception as e:
                 logger.error(f"[{b_name}] Error fetching live Delta quotes: {e}")
 
+        # LIVE DEMO ORDER EXECUTION ON DELTA EXCHANGE
+        short_order_id = None
+        long_order_id = None
+        if delta_client:
+            try:
+                if s_prod and s_prod.get("id"):
+                    ok_s, res_s, err_s = place_order_verified(delta_client, s_prod["id"], lots, "sell", f"{b_name} Sell {opt_type} {s_strike}")
+                    if ok_s and res_s:
+                        short_order_id = res_s.get("id")
+                if l_prod and l_prod.get("id"):
+                    ok_l, res_l, err_l = place_order_verified(delta_client, l_prod["id"], lots, "buy", f"{b_name} Buy {opt_type} {l_strike}")
+                    if ok_l and res_l:
+                        long_order_id = res_l.get("id")
+            except Exception as e:
+                logger.error(f"[{b_name}] Exception placing Demo orders on Delta: {e}")
+
         fees = calc_delta_fee(spot, s_prem, qty) + calc_delta_fee(spot, l_prem, qty)
         net_credit = s_prem - l_prem
         sl_trigger = round(s_prem * 2.0, 2)
+        entry_time_ist = get_current_ist_str()
 
         short_leg = {
             "type": opt_type,
             "strike": s_strike,
             "product_symbol": s_prod["symbol"] if s_prod else None,
             "product_id": s_prod["id"] if s_prod else None,
+            "order_id": short_order_id,
             "entry_prem": s_prem,
+            "entry_spot": spot,
+            "entry_time_ist": entry_time_ist,
             "sl_trigger": sl_trigger,
             "entry_time": datetime.now(timezone.utc).isoformat(),
             "hours_held": 0,
@@ -605,7 +802,10 @@ class StrategyEngine:
             "strike": l_strike,
             "product_symbol": l_prod["symbol"] if l_prod else None,
             "product_id": l_prod["id"] if l_prod else None,
+            "order_id": long_order_id,
             "entry_prem": l_prem,
+            "entry_spot": spot,
+            "entry_time_ist": entry_time_ist,
             "entry_time": datetime.now(timezone.utc).isoformat(),
             "hours_held": 0,
             "expiry_code": target_date_code,
@@ -624,28 +824,11 @@ class StrategyEngine:
             basket_id,
             active_short=short_leg,
             active_longs=[long_leg],
-            hedge_legs=[]
+            hedge_legs=[],
+            entry_spot=spot,
+            entry_time_ist=entry_time_ist
         )
-
-        m = cls.get_current_metrics()
-
-        msg = (
-            f"🚀 <b>NEW SPREAD OPENED</b>\n"
-            f"📦 <b>Basket:</b> <b>{b_name}</b>\n"
-            f"<b>Strategy:</b> {spread_name}\n"
-            f"<b>BTC Spot:</b> ${spot:,.2f}\n"
-            f"📅 <b>Expiry:</b> {target_expiry_disp}\n"
-            f"------------------------------------\n"
-            f"🔻 <b>Sell {opt_type}:</b> Strike ${s_strike:,.0f} @ ${s_prem:.2f}\n"
-            f"🔹 <b>Buy {opt_type}:</b> Strike ${l_strike:,.0f} @ ${l_prem:.2f}\n"
-            f"💰 <b>Net Credit:</b> ${net_credit:.2f} ({qty} BTC)\n"
-            f"🛡️ <b>2x SL Trigger:</b> ${sl_trigger:.2f}\n"
-            f"------------------------------------\n"
-            f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
-            f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
-        )
-
-        telegram.send_message(msg)
+        return True
 
     @classmethod
     def check_active_positions(cls):
@@ -756,27 +939,29 @@ class StrategyEngine:
                         h_prem = bs_call(spot, h_k, t_left)
                         h_type = "C"
 
+                    lots = b_conf.get("lots", CONFIG.get("LOTS_PER_BASKET", 10))
+                    h_prod = None
+                    if delta_client:
+                        try:
+                            h_prod = delta_client.find_option(h_type, h_k, target_date=active_short.get("expiry_code"))
+                            if h_prod and h_prod.get("id"):
+                                place_order_verified(delta_client, h_prod["id"], lots, "buy", f"{b_name} Option A Hedge Buy {h_type} {h_k}")
+                        except Exception as e:
+                            logger.error(f"[{b_name}] Error executing hedge on Delta: {e}")
+
                     h_fee = calc_delta_fee(spot, h_prem, qty)
                     hedge_cost = (h_prem * qty) + h_fee
                     new_bal = state_mgr.state["balance"] - hedge_cost
                     new_fees = state_mgr.state["total_fees_paid"] + h_fee
                     
                     hedge_legs.append({
-                        "type": h_type, "strike": h_k, "entry_prem": h_prem, "hours_held": active_short["hours_held"]
+                        "type": h_type, "strike": h_k, "entry_prem": h_prem, "hours_held": active_short["hours_held"],
+                        "product_id": h_prod.get("id") if h_prod else None
                     })
                     state_mgr.update(balance=round(new_bal, 2), total_fees_paid=round(new_fees, 2))
                     state_mgr.update_basket(b_id, active_short=active_short, hedge_legs=hedge_legs)
 
-                    m = cls.get_current_metrics()
-                    telegram.send_message(
-                        f"🛡️ <b>OPTION A HEDGE TRIGGERED [{b_name}]</b>\n"
-                        f"Short Leg ${active_short['strike']:,.0f} hit 2x trigger (${val:.2f})!\n"
-                        f"Bought protective {h_type} Strike ${h_k:,.0f} @ ${h_prem:.2f}\n"
-                        f"Hedge Cost: ${hedge_cost:.2f}\n"
-                        f"------------------------------------\n"
-                        f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
-                        f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
-                    )
+                    cls.send_combined_baskets_alert(trigger_reason=f"OPTION A HEDGE TRIGGERED [{b_name}]")
 
                 expired = False
                 if active_short.get("expiry_code"):
@@ -797,6 +982,11 @@ class StrategyEngine:
                     tp_count = b_st.get("tp_80_count", 0) + 1
                     wins = b_st.get("winning_trades", 0) + 1
                     trades_cnt = b_st.get("total_trades", 0) + 1
+
+                    # 1. Close old short on Delta Exchange Demo (Buy back)
+                    lots = b_conf.get("lots", CONFIG.get("LOTS_PER_BASKET", 10))
+                    if delta_client and active_short.get("product_id"):
+                        place_order_verified(delta_client, active_short["product_id"], lots, "buy", f"{b_name} 80% TP Buy-Close Short {active_short['strike']}")
 
                     state_mgr.update(
                         balance=round(new_bal, 2),
@@ -840,15 +1030,25 @@ class StrategyEngine:
                         except Exception as e:
                             logger.error(f"[{b_name}] Error quoting roll on Delta: {e}")
 
-                    roll_fee = calc_delta_fee(spot, new_prem, qty)
+                    # 2. Sell new rolled short on Delta Exchange Demo
+                    new_order_id = None
+                    if delta_client and new_s_prod and new_s_prod.get("id"):
+                        ok_rn, res_rn, _ = place_order_verified(delta_client, new_s_prod["id"], lots, "sell", f"{b_name} Rolled Sell Short {roll_type} {new_k}")
+                        if ok_rn and res_rn:
+                            new_order_id = res_rn.get("id")
+
                     rolled_count = b_st.get("rolled_count", 0) + 1
+                    entry_time_ist = get_current_ist_str()
 
                     new_short = {
                         "type": roll_type,
                         "strike": new_k,
                         "product_symbol": new_s_prod["symbol"] if new_s_prod else None,
                         "product_id": new_s_prod["id"] if new_s_prod else None,
+                        "order_id": new_order_id,
                         "entry_prem": new_prem,
+                        "entry_spot": spot,
+                        "entry_time_ist": entry_time_ist,
                         "sl_trigger": round(new_prem * 2.0, 2),
                         "entry_time": datetime.now(timezone.utc).isoformat(),
                         "hours_held": 0,
@@ -860,20 +1060,7 @@ class StrategyEngine:
                     state_mgr.update(rolled_count=state_mgr.state.get("rolled_count", 0) + 1)
                     state_mgr.update_basket(b_id, active_short=new_short, rolled_count=rolled_count)
 
-                    m = cls.get_current_metrics()
-                    profit_inr_str = f"₹{profit * CONFIG.get('USD_TO_INR', 85.0):+,.0f} INR"
-
-                    telegram.send_message(
-                        f"🎯 <b>80% PROFIT BOOKED & ROLLED!</b>\n"
-                        f"📦 <b>Basket:</b> <b>{b_name}</b>\n"
-                        f"✅ <b>Closed Short:</b> Strike ${active_short['strike']:,.0f} @ ${val:.2f} (Profit: +${profit:.2f} / {profit_inr_str})\n"
-                        f"🔄 <b>Rolled New Short {roll_type}:</b> Strike ${new_k:,.0f} @ ${new_prem:.2f}\n"
-                        f"📅 <b>Expiry:</b> {target_expiry_disp}\n"
-                        f"🛡️ <i>Existing Long Leg preserved as free hedge.</i>\n"
-                        f"------------------------------------\n"
-                        f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
-                        f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
-                    )
+                    cls.send_combined_baskets_alert(trigger_reason=f"80% PROFIT ROLLED [{b_name}]")
                 
                 elif expired:
                     s_settle_fee = calc_delta_fee(spot, val, qty) if val > 0 else 0.0
@@ -881,16 +1068,7 @@ class StrategyEngine:
                     new_bal = state_mgr.state["balance"] + profit
                     state_mgr.update(balance=round(new_bal, 2))
                     state_mgr.update_basket(b_id, active_short=None)
-                    m = cls.get_current_metrics()
-                    profit_inr_str = f"₹{profit * CONFIG.get('USD_TO_INR', 85.0):+,.0f} INR"
-                    telegram.send_message(
-                        f"🏁 <b>Contract Expired & Settled [{b_name}]</b>\n"
-                        f"<b>Short Strike:</b> ${active_short['strike']:,.0f} | <b>Profit:</b> ${profit:+.2f} ({profit_inr_str})\n"
-                        f"⏳ <i>Delta Settlement Window active (17:30 - 18:30 IST).\nNext cycle trade opens at 18:31 IST!</i>\n"
-                        f"------------------------------------\n"
-                        f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
-                        f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
-                    )
+                    cls.send_combined_baskets_alert(trigger_reason=f"CONTRACT EXPIRED & SETTLED [{b_name}]")
 
     @classmethod
     def close_basket_positions(cls, basket_id, reason):
@@ -900,19 +1078,24 @@ class StrategyEngine:
         b_st = st.get("baskets", {}).get(basket_id, {})
         spot = cls.get_spot()
         qty = b_conf.get("contract_size", CONFIG["CONTRACT_SIZE"])
+        lots = b_conf.get("lots", CONFIG.get("LOTS_PER_BASKET", 10))
         pnl_accum = 0.0
         
-        # Close short
+        # Close short on Delta and state
         if b_st.get("active_short"):
             s = b_st["active_short"]
+            if delta_client and s.get("product_id"):
+                place_order_verified(delta_client, s["product_id"], lots, "buy", f"{b_name} Close Short Reversal")
             T = max(0.0, 24 - s.get("hours_held", 0)) / (365.0 * 24.0)
             val = bs_put(spot, s["strike"], T) if s["type"] == "P" else bs_call(spot, s["strike"], T)
             fee = calc_delta_fee(spot, val, qty)
             pnl = (s["entry_prem"] - val) * qty - fee
             pnl_accum += pnl
 
-        # Close longs
+        # Close longs on Delta and state
         for l in b_st.get("active_longs", []):
+            if delta_client and l.get("product_id"):
+                place_order_verified(delta_client, l["product_id"], lots, "sell", f"{b_name} Close Long Reversal")
             T = max(0.0, 24 - l.get("hours_held", 0)) / (365.0 * 24.0)
             val = bs_put(spot, l["strike"], T) if l["type"] == "P" else bs_call(spot, l["strike"], T)
             fee = calc_delta_fee(spot, val, qty) if val > 0 else 0.0
@@ -927,17 +1110,7 @@ class StrategyEngine:
             active_longs=[],
             hedge_legs=[]
         )
-        m = cls.get_current_metrics()
-        pnl_inr_str = f"₹{pnl_accum * CONFIG.get('USD_TO_INR', 85.0):+,.0f} INR"
-        telegram.send_message(
-            f"🔄 <b>POSITIONS CLOSED</b>\n"
-            f"📦 <b>Basket:</b> <b>{b_name}</b>\n"
-            f"<b>Reason:</b> {reason}\n"
-            f"<b>Realized PnL:</b> ${pnl_accum:+.2f} ({pnl_inr_str})\n"
-            f"------------------------------------\n"
-            f"📈 <b>Running Trade PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
-            f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})"
-        )
+        cls.send_combined_baskets_alert(trigger_reason=f"POSITIONS CLOSED [{b_name}] - {reason}")
 
     @classmethod
     def close_all_open_positions(cls, reason):
@@ -975,68 +1148,8 @@ def telegram_polling_worker():
                     )
                     telegram.send_message(reply)
 
-                elif text in ["/balance", "/status"]:
-                    init = 200.0
-                    m = StrategyEngine.get_current_metrics()
-                    bal = m["bal_usd"]
-                    inr_str = f" ({m['bal_inr_str']})"
-                    pnl = bal - init
-                    ret = (pnl / init) * 100
-                    win_pct = (st["winning_trades"] / st["total_trades"] * 100) if st["total_trades"] > 0 else 0
-                    
-                    b1_info = m.get("baskets", {}).get("basket_1", {})
-                    b2_info = m.get("baskets", {}).get("basket_2", {})
-                    b1_trend = b1_info.get("current_trend") or "Flat"
-                    b2_trend = b2_info.get("current_trend") or "Flat"
-
-                    reply = (
-                        f"📊 <b>DELTA TESTNET DUAL-BASKET STATUS</b>\n"
-                        f"<b>Account:</b> Delta Exchange India Testnet\n"
-                        f"<b>Starting Capital:</b> ${init:.2f}\n"
-                        f"------------------------------------\n"
-                        f"📈 <b>Total Running PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
-                        f"💵 <b>Net Account Balance:</b> ${bal:.2f}{inr_str}\n"
-                        f"💎 <b>Total Account Equity:</b> ${m['equity_usd']:.2f} ({m['equity_inr_str']})\n"
-                        f"------------------------------------\n"
-                        f"📦 <b>Basket 1 (1H+4H Confirmed | OTM 2/8):</b>\n"
-                        f"   • Trend: <b>{b1_trend}</b> | Running PnL: <b>${b1_info.get('running_pnl_usd', 0):+.2f}</b>\n"
-                        f"📦 <b>Basket 2 (Pure 1H Fast | OTM 2/8):</b>\n"
-                        f"   • Trend: <b>{b2_trend}</b> | Running PnL: <b>${b2_info.get('running_pnl_usd', 0):+.2f}</b>\n"
-                        f"------------------------------------\n"
-                        f"<b>Closed Realized Profit:</b> ${pnl:+.2f} ({ret:+.2f}%)\n"
-                        f"<b>Total Trades:</b> {st['total_trades']} (80% Rolls: {st.get('tp_80_count', 0)})\n"
-                        f"<b>4H Macro Trend:</b> {st.get('trend_4h', 'None')}\n"
-                        f"<b>BTC Spot:</b> ${spot:,.2f}"
-                    )
-                    telegram.send_message(reply)
-
-                elif text == "/positions":
-                    m = StrategyEngine.get_current_metrics()
-                    b_summaries = m.get("baskets", {})
-                    reply = "📋 <b>ACTIVE OPEN LEGS (DUAL BASKET):</b>\n"
-
-                    for b_id, b_conf in CONFIG.get("BASKETS", {}).items():
-                        b_info = b_summaries.get(b_id, {})
-                        s = b_info.get("active_short")
-                        longs = b_info.get("active_longs", [])
-                        reply += f"\n📦 <b>{b_conf['name']}</b>:\n"
-                        if not s and not longs:
-                            reply += "   ⚪ <i>Flat (No open positions)</i>\n"
-                        else:
-                            if s:
-                                exp_s = s.get("expiry_display", get_cycle_target_expiry_display())
-                                reply += f"   🔻 <b>Short {s['type']}:</b> Strike ${s['strike']:,.0f} | Entry: ${s['entry_prem']:.2f} | 2x SL: ${s['sl_trigger']:.2f}\n      📅 <i>Expiry: {exp_s}</i>\n"
-                            for l in longs:
-                                exp_l = l.get("expiry_display", get_cycle_target_expiry_display())
-                                reply += f"   🔹 <b>Long {l['type']}:</b> Strike ${l['strike']:,.0f} | Entry: ${l['entry_prem']:.2f}\n      📅 <i>Expiry: {exp_l}</i>\n"
-                            reply += f"   📊 <i>Basket PnL: ${b_info['running_pnl_usd']:+.2f} ({b_info['running_pnl_inr_str']})</i>\n"
-
-                    reply += (
-                        f"------------------------------------\n"
-                        f"📈 <b>Total Running PnL:</b> ${m['running_pnl_usd']:+.2f} ({m['running_pnl_inr_str']})\n"
-                        f"💵 <b>Net Account Balance:</b> ${m['bal_usd']:.2f} ({m['bal_inr_str']})\n"
-                        f"💎 <b>Total Account Equity:</b> ${m['equity_usd']:.2f} ({m['equity_inr_str']})"
-                    )
+                elif text in ["/balance", "/status", "/positions"]:
+                    reply = StrategyEngine.format_combined_baskets_alert()
                     telegram.send_message(reply)
 
                 elif text == "/rollstats":
