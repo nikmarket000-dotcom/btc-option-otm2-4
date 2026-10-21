@@ -78,7 +78,8 @@ class DeltaClient:
             "api-key": self.api_key,
             "timestamp": ts,
             "signature": sig,
-            "User-Agent": "DeltaBot/1.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "application/json",
             "Content-Type": "application/json"
         }
 
@@ -110,7 +111,8 @@ class DeltaClient:
         for b_url in candidate_bases:
             url = b_url + path + qs
             headers = self._sign_request(method, path, qs, payload_str) if auth else {
-                "User-Agent": "DeltaBot/1.0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "application/json",
                 "Content-Type": "application/json"
             }
             req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
@@ -258,7 +260,11 @@ class DeltaClient:
             candidates.sort(key=lambda x: (x[0], x[1]))
             return candidates[0][2]
 
-        # Fallback: Closest future expiry with at least 8 hours left
+        # If a strict target_date was requested, strictly return None so caller can step down strikes!
+        if target_date:
+            return None
+
+        # Fallback: Closest future expiry with at least 8 hours left (only when target_date is None)
         fallback_candidates = []
         for sym, t in tickers.items():
             if not sym.startswith(prefix):
@@ -276,6 +282,10 @@ class DeltaClient:
             else:
                 continue
             strike = float(t.get("strike_price", 0))
+            if min_strike is not None and strike < min_strike:
+                continue
+            if max_strike is not None and strike > max_strike:
+                continue
             diff = abs(strike - target_strike)
             fallback_candidates.append((diff, h_left, {
                 "id": t.get("product_id"),

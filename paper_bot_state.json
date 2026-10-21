@@ -1,0 +1,45 @@
+{
+  "balance": 200.0,
+  "initial_capital": 200.0,
+  "active_trading_capital": 100.0,
+  "reserve_buffer": 100.0,
+  "current_trend": null,
+  "trend_4h": "BULLISH",
+  "exchange": "DELTA_INDIA_TESTNET",
+  "active_short": null,
+  "active_longs": [],
+  "hedge_legs": [],
+  "simulated_spot": 83400.0,
+  "total_fees_paid": 0.0,
+  "total_trades": 0,
+  "winning_trades": 0,
+  "tp_80_count": 0,
+  "rolled_count": 0,
+  "trade_history": [],
+  "baskets": {
+    "basket_1": {
+      "id": "basket_1",
+      "name": "Basket 1 (1H+4H Filter | OTM 2/8)",
+      "current_trend": null,
+      "active_short": null,
+      "active_longs": [],
+      "hedge_legs": [],
+      "tp_80_count": 0,
+      "rolled_count": 0,
+      "total_trades": 0,
+      "winning_trades": 0
+    },
+    "basket_2": {
+      "id": "basket_2",
+      "name": "Basket 2 (1H Filter | OTM 2/8)",
+      "current_trend": null,
+      "active_short": null,
+      "active_longs": [],
+      "hedge_legs": [],
+      "tp_80_count": 0,
+      "rolled_count": 0,
+      "total_trades": 0,
+      "winning_trades": 0
+    }
+  }
+}

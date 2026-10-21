@@ -227,7 +227,10 @@ class TelegramClient:
             req = urllib.request.Request(
                 url,
                 data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json", "User-Agent": "OptionsBot/1.0"}
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                }
             )
             with urllib.request.urlopen(req, context=ctx, timeout=8) as res:
                 return json.loads(res.read().decode())
@@ -240,7 +243,10 @@ class TelegramClient:
         try:
             ctx = ssl._create_unverified_context()
             url = f"{self.api_url}/getUpdates?offset={self.last_update_id + 1}&timeout=5"
-            req = urllib.request.Request(url, headers={"User-Agent": "OptionsBot/1.0"})
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
+            )
             with urllib.request.urlopen(req, context=ctx, timeout=10) as res:
                 data = json.loads(res.read().decode())
                 if data.get("ok"):
@@ -1338,7 +1344,10 @@ def fetch_live_klines(interval="1h", limit=50):
     # 1. Binance public candles
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={interval}&limit={limit}"
-        req = urllib.request.Request(url, headers={"User-Agent": "OptionsBot/1.0"})
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
+        )
         with urllib.request.urlopen(req, context=ctx, timeout=8) as res:
             raw = json.loads(res.read().decode())
             return [{'open': float(c[1]), 'high': float(c[2]), 'low': float(c[3]), 'close': float(c[4])} for c in raw]
@@ -1348,7 +1357,10 @@ def fetch_live_klines(interval="1h", limit=50):
     try:
         gran = 3600 if interval == "1h" else 14400
         url = f"https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity={gran}"
-        req = urllib.request.Request(url, headers={"User-Agent": "OptionsBot/1.0"})
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
+        )
         with urllib.request.urlopen(req, context=ctx, timeout=8) as res:
             raw = json.loads(res.read().decode())
             raw.reverse()
