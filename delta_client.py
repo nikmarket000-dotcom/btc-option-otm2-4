@@ -69,6 +69,12 @@ class DeltaClient:
         self.api_secret = api_secret or os.getenv("DELTA_API_SECRET", "vlAWUvLbdSnSdtXD1174wnWHPbhRkv7ZwtzUMvIlhamOAZdquAg1bbN7LYwU")
         self.base_url = base_url or os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
         self.ctx = ssl._create_unverified_context()
+        self.proxy_url = os.getenv("DELTA_PROXY_URL") or os.getenv("FIXIE_URL")
+        handlers = []
+        if self.proxy_url:
+            handlers.append(urllib.request.ProxyHandler({'http': self.proxy_url, 'https': self.proxy_url}))
+        handlers.append(urllib.request.HTTPSHandler(context=self.ctx))
+        self.opener = urllib.request.build_opener(*handlers)
 
     def _sign_request(self, method, path, query_string="", payload=""):
         ts = str(int(time.time()))
@@ -110,7 +116,7 @@ class DeltaClient:
             }
             req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
             try:
-                with urllib.request.urlopen(req, context=self.ctx, timeout=8) as res:
+                with self.opener.open(req, timeout=8) as res:
                     return json.loads(res.read().decode("utf-8"))
             except urllib.error.HTTPError as he:
                 err_body = he.read().decode("utf-8") if hasattr(he, "read") else ""
@@ -172,7 +178,7 @@ class DeltaClient:
                     "Accept": "application/json"
                 }
                 req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, context=self.ctx, timeout=6) as res:
+                with self.opener.open(req, timeout=6) as res:
                     d = json.loads(res.read().decode("utf-8"))
                     if d.get("success") and d.get("result"):
                         return {t["symbol"]: t for t in d["result"] if "symbol" in t}
@@ -369,7 +375,7 @@ class DeltaClient:
                     "Accept": "application/json"
                 }
                 req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, context=self.ctx, timeout=7) as res:
+                with self.opener.open(req, timeout=7) as res:
                     d = json.loads(res.read().decode("utf-8"))
                     if d.get("success") and d.get("result"):
                         tickers_data = d.get("result")
