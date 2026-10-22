@@ -780,11 +780,15 @@ class StrategyEngine:
                             logger.info(f"[{b_name}] ✅ OTM 4 (${l_strike}) selected as fallback for next-day expiry.")
 
                 if s_prod:
+                    if s_prod.get("strike"):
+                        s_strike = float(s_prod["strike"])
                     q_s = delta_client.get_ticker_quote(s_prod["symbol"])
                     if q_s and q_s.get("mark_price", 0) > 0:
                         s_prem = round(q_s["mark_price"], 2)
                         logger.info(f"[{b_name}] Live Delta quote for Short {s_prod['symbol']}: ${s_prem}")
                 if l_prod:
+                    if l_prod.get("strike"):
+                        l_strike = float(l_prod["strike"])
                     q_l = delta_client.get_ticker_quote(l_prod["symbol"])
                     if q_l and q_l.get("mark_price", 0) > 0:
                         l_prem = round(q_l["mark_price"], 2)
