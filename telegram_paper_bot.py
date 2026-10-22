@@ -1259,6 +1259,17 @@ def monitor_loop():
 
 # --- TRADINGVIEW WEBHOOK HANDLER ---
 class WebhookHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        res = {
+            "status": "online",
+            "bot": "1H Supertrend Options Bot",
+            "time": get_current_ist_str()
+        }
+        self.wfile.write(json.dumps(res).encode("utf-8"))
+
     def do_POST(self):
         if self.path != "/webhook":
             self.send_response(404)
