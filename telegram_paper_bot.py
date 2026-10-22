@@ -55,9 +55,9 @@ logging.basicConfig(
 logger = logging.getLogger("TelegramPaperBot")
 
 # --- DELTA EXCHANGE TESTNET CONNECTOR ---
-DELTA_API_KEY = os.getenv("DELTA_API_KEY", "BDERFCaZsygWC8X41ptfTZIm22iTqA")
-DELTA_API_SECRET = os.getenv("DELTA_API_SECRET", "mQzIZP9BuMJs8o37DbDDIFfkl6AGHuDBvPVRZuloUraHen6SXPWzKc9zPtWJ")
-DELTA_BASE_URL = os.getenv("DELTA_BASE_URL", "https://api.testnet.deltaex.org")
+DELTA_API_KEY = os.getenv("DELTA_API_KEY", "9GY1YAlETQtQVOxdP1hVcxwSkCZCy6")
+DELTA_API_SECRET = os.getenv("DELTA_API_SECRET", "vlAWUvLbdSnSdtXD1174wnWHPbhRkv7ZwtzUMvIlhamOAZdquAg1bbN7LYwU")
+DELTA_BASE_URL = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
 
 delta_client = None
 if DELTA_API_KEY:
@@ -135,24 +135,15 @@ CONFIG = {
     "SHORT_OTM_STEP": 2,               # OTM 2 = 2 * $200 = $400 away
     "LONG_OTM_STEP": 8,                # OTM 8 = 8 * $200 = $1600 away
     "TAKE_PROFIT_PCT": 0.80,           # 80% profit booking threshold
-    "USE_4H_FILTER": True,             # 4-Hour Trend Confirmation Filter (Slashes Drawdown to 15.3% & saves $17 in fees!)
+    "USE_4H_FILTER": False,            # 4-Hour Trend filter disabled as requested (Pure 1H Supertrend)
     "USD_TO_INR": float(os.getenv("USD_TO_INR", 85.0)), # USD to INR conversion rate for Delta India
     
-    # Dual Baskets Architecture
+    # Single Basket Architecture (Pure 1H Filter | OTM 2/8)
     "BASKETS": {
         "basket_1": {
             "id": "basket_1",
-            "name": "Basket 1 (1H+4H Filter | OTM 2/8)",
-            "use_4h_filter": True,
-            "short_otm_step": 2,  # OTM 2 = $400 away
-            "long_otm_step": 8,   # OTM 8 = $1600 away
-            "contract_size": 0.01,
-            "lots": 10,
-        },
-        "basket_2": {
-            "id": "basket_2",
-            "name": "Basket 2 (1H Filter | OTM 2/8)",
-            "use_4h_filter": False,  # Follows ONLY 1H - No 4H filter!
+            "name": "Basket (1H Filter | OTM 2/8)",
+            "use_4h_filter": False,  # Follows ONLY 1H Supertrend
             "short_otm_step": 2,  # OTM 2 = $400 away
             "long_otm_step": 8,   # OTM 8 = $1600 away
             "contract_size": 0.01,
@@ -168,7 +159,7 @@ CONFIG = {
     "AUTO_POLL_INTERVAL_SECONDS": 45,  # Checks live exchange candles every 45s
     
     # Telegram Bot Settings
-    "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", "8272565065:AAEVa22kCFQmV66DBHjcFstpDe9t6dZV5_U"),
+    "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", "8738017140:AAEK6ISeC-kJWeIZge_0Yw71etSTiwa-vv0"),
     "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", "857206681"),
     
     # State Persistence
@@ -522,7 +513,7 @@ class StrategyEngine:
         }
 
     @classmethod
-    def build_basket_card(cls, basket_id, b_conf, b_st, spot, current_time_str, trend_1h, trend_4h):
+    def build_basket_card(cls, basket_id, b_conf, b_st, spot, current_time_str, trend_1h, trend_4h=None):
         b_name = b_conf.get("name", f"Basket ({basket_id})")
         s = b_st.get("active_short")
         longs = b_st.get("active_longs", [])
@@ -531,29 +522,38 @@ class StrategyEngine:
         short_step = b_conf.get("short_otm_step", 2)
         long_step = b_conf.get("long_otm_step", 8)
 
-        st_info = f"4h {trend_4h.lower()}/ 1h {trend_1h.lower()}"
+        t_4h_str = (trend_4h or "BEARISH").lower()
+        t_1h_str = (trend_1h or "BEARISH").lower()
+        if b_conf.get("use_4h_filter", False) and trend_4h:
+            st_info = f"4h {t_4h_str}/ 1h {t_1h_str}"
+        else:
+            st_info = f"1h {t_1h_str}"
+
+        st_data = state_mgr.state
+        now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        today_date = now_ist.strftime("%Y-%m-%d")
+        daily_flips = st_data.get("daily_flips_count", 0) if st_data.get("daily_flips_date") == today_date else 0
+        flips_line = f"Today's 1H Flips: {daily_flips} time{'s' if daily_flips != 1 else ''}"
 
         if not s or not l:
-            if b_conf.get("use_4h_filter", False) and trend_1h != trend_4h:
-                strat_line = f"Strategy: ⏸️ WAITING FOR 4H FILTER.  {st_info}"
-                status_text = f"1H is {trend_1h.lower()}, waiting for 4H {trend_4h.lower()} confirmation"
-            else:
-                strat_line = f"Strategy: ⏸️ STANDBY.  {st_info}"
-                status_text = "Waiting for next entry signal"
+            strat_line = f"Strategy: ⏸️ STANDBY.  {st_info}"
+            status_text = "Waiting for next entry signal"
 
             return (
                 f"{b_name}\n\n"
-                f"{strat_line}\n\n"
+                f"{strat_line}\n"
+                f"{flips_line}\n\n"
                 f"Status: {status_text}\n"
                 f"BTC current Spot: ${spot:,.2f}\n"
                 f"time : {current_time_str}\n\n"
                 f"Running Trade PnL : $0.00 (₹0 INR)"
             )
 
+        actual_long_step = l.get("otm_step", long_step) if l else long_step
         opt_type = s.get("type", "P")
         opt_name = "BULL PUT SPREAD" if opt_type == "P" else "BEAR CALL SPREAD"
         strat_icon = "🟢" if opt_type == "P" else "🔴"
-        spread_name = f"{strat_icon} {opt_name} (OTM {short_step} / OTM {long_step}).  {st_info}"
+        spread_name = f"{strat_icon} {opt_name} (OTM {short_step} / OTM {actual_long_step}).  {st_info}"
 
         entry_spot = s.get("entry_spot") or b_st.get("entry_spot") or spot
         entry_time_ist = s.get("entry_time_ist") or b_st.get("entry_time_ist") or current_time_str
@@ -604,7 +604,8 @@ class StrategyEngine:
 
         return (
             f"{b_name}\n\n"
-            f"Strategy: {spread_name}\n\n"
+            f"Strategy: {spread_name}\n"
+            f"{flips_line}\n\n"
             f"buying sport : ${entry_spot:,.2f}\n"
             f"time : {entry_time_ist}\n\n"
             f"Expiry: {expiry_disp}\n\n"
@@ -628,14 +629,10 @@ class StrategyEngine:
         trend_1h = st.get("current_trend", "BULLISH")
 
         baskets_conf = CONFIG.get("BASKETS", {})
-        b1_conf = baskets_conf.get("basket_1", {})
-        b2_conf = baskets_conf.get("basket_2", {})
-
-        b1_st = st.get("baskets", {}).get("basket_1", {})
-        b2_st = st.get("baskets", {}).get("basket_2", {})
-
-        card1 = cls.build_basket_card("basket_1", b1_conf, b1_st, spot, curr_time_str, trend_1h, trend_4h)
-        card2 = cls.build_basket_card("basket_2", b2_conf, b2_st, spot, curr_time_str, trend_1h, trend_4h)
+        cards = []
+        for b_id, b_conf in baskets_conf.items():
+            b_st = st.get("baskets", {}).get(b_id, {})
+            cards.append(cls.build_basket_card(b_id, b_conf, b_st, spot, curr_time_str, trend_1h, trend_4h))
 
         bal = st.get("balance", CONFIG["STARTING_CAPITAL"])
         if delta_client:
@@ -650,13 +647,11 @@ class StrategyEngine:
         bal_inr = bal * usd_to_inr
 
         header = f"⚡ <b>{trigger_reason}</b>\n\n" if trigger_reason else ""
+        cards_text = "\n\n------------------------------------\n\n".join(cards)
 
         msg = (
             f"{header}"
-            f"{card1}\n\n"
-            f"------------------------------------\n\n"
-            f"{card2}\n\n"
-            f"------------------------------------\n"
+            f"{cards_text}\n\n"
             f"account balance : ${bal:,.2f} ({bal_inr:,.0f} INR)"
         )
         return msg
@@ -700,9 +695,15 @@ class StrategyEngine:
                 logger.info(f"[{b_name}] Signal matches current trend ({signal}). Position already active.")
                 continue
 
-            # Trend Reversal: Close open positions in this basket
+            # Trend Flip / Reversal: Increment daily flip counter and close previous basket
             if curr_trend and curr_trend != signal:
-                cls.close_basket_positions(b_id, reason=f"Trend Reversal ({curr_trend} ➡️ {signal})")
+                now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+                today_date = now_ist.strftime("%Y-%m-%d")
+                daily_flips = st.get("daily_flips_count", 0) if st.get("daily_flips_date") == today_date else 0
+                daily_flips += 1
+                state_mgr.update(daily_flips_date=today_date, daily_flips_count=daily_flips)
+                logger.info(f"[{b_name}] 🔄 1H Supertrend FLIP #{daily_flips} today: {curr_trend} ➡️ {signal}")
+                cls.close_basket_positions(b_id, reason=f"1H Supertrend Flip #{daily_flips} ({curr_trend} ➡️ {signal})")
 
             # Settlement window check (17:30 - 18:30 IST)
             if is_in_settlement_window():
@@ -749,13 +750,35 @@ class StrategyEngine:
             opt_type = "C"
             spread_name = f"🔴 BEAR CALL SPREAD (OTM {short_step} / OTM {long_step})"
 
-        # Fetch live market quotes from Delta Exchange if available
+        # Fetch live market quotes from Delta Exchange with OTM 8 -> OTM 6 fallback
+        actual_long_step = long_step
         s_prod = None
         l_prod = None
         if delta_client:
             try:
                 s_prod = delta_client.find_option(opt_type, s_strike, target_date=target_date_code)
+                # First try OTM 8 for next-day expiry
                 l_prod = delta_client.find_option(opt_type, l_strike, target_date=target_date_code)
+                if not l_prod:
+                    logger.info(f"[{b_name}] OTM 8 (${l_strike}) not listed on Delta for {target_date_code}. Checking OTM 6 fallback...")
+                    otm6_step = 6
+                    otm6_strike = atm - (otm6_step * interval) if signal == "BULLISH" else atm + (otm6_step * interval)
+                    l_prod = delta_client.find_option(opt_type, otm6_strike, target_date=target_date_code)
+                    if l_prod:
+                        l_strike = otm6_strike
+                        actual_long_step = otm6_step
+                        l_prem = round(bs_put(spot, l_strike, T_init) if opt_type == "P" else bs_call(spot, l_strike, T_init), 2)
+                        logger.info(f"[{b_name}] ✅ OTM 6 (${l_strike}) selected as fallback for next-day expiry.")
+                    else:
+                        otm4_step = 4
+                        otm4_strike = atm - (otm4_step * interval) if signal == "BULLISH" else atm + (otm4_step * interval)
+                        l_prod = delta_client.find_option(opt_type, otm4_strike, target_date=target_date_code)
+                        if l_prod:
+                            l_strike = otm4_strike
+                            actual_long_step = otm4_step
+                            l_prem = round(bs_put(spot, l_strike, T_init) if opt_type == "P" else bs_call(spot, l_strike, T_init), 2)
+                            logger.info(f"[{b_name}] ✅ OTM 4 (${l_strike}) selected as fallback for next-day expiry.")
+
                 if s_prod:
                     q_s = delta_client.get_ticker_quote(s_prod["symbol"])
                     if q_s and q_s.get("mark_price", 0) > 0:
@@ -810,6 +833,7 @@ class StrategyEngine:
         long_leg = {
             "type": opt_type,
             "strike": l_strike,
+            "otm_step": actual_long_step,
             "product_symbol": l_prod["symbol"] if l_prod else None,
             "product_id": l_prod["id"] if l_prod else None,
             "order_id": long_order_id,
@@ -984,93 +1008,24 @@ class StrategyEngine:
                 if not expired and active_short.get("hours_held", 0) >= 24.0:
                     expired = True
 
-                # --- HANDLE 80% PROFIT BOOK & ROLL ---
+                # --- HANDLE 80% PROFIT TARGET: EXIT CURRENT BASKET & OPEN NEXT-DAY BASKET ---
                 if tp_hit:
-                    close_fee = calc_delta_fee(spot, val, qty)
-                    profit = (active_short["entry_prem"] - val) * qty - close_fee
-                    new_bal = state_mgr.state["balance"] + profit
-                    tp_count = b_st.get("tp_80_count", 0) + 1
-                    wins = b_st.get("winning_trades", 0) + 1
-                    trades_cnt = b_st.get("total_trades", 0) + 1
+                    logger.info(f"[{b_name}] 🎯 80% Take Profit hit! (Val: ${val:.2f} <= Threshold: ${active_short['entry_prem'] * (1.0 - CONFIG['TAKE_PROFIT_PCT']):.2f})")
+                    curr_trend = b_st.get("current_trend") or ("BULLISH" if active_short["type"] == "P" else "BEARISH")
 
-                    # 1. Close old short on Delta Exchange Demo (Buy back)
-                    lots = b_conf.get("lots", CONFIG.get("LOTS_PER_BASKET", 10))
-                    if delta_client and active_short.get("product_id"):
-                        place_order_verified(delta_client, active_short["product_id"], lots, "buy", f"{b_name} 80% TP Buy-Close Short {active_short['strike']}")
+                    # 1. Exit current basket completely (close both short and long legs on Delta Demo)
+                    cls.close_basket_positions(b_id, reason="80% Target Profit Achieved 🎯")
 
-                    state_mgr.update(
-                        balance=round(new_bal, 2),
-                        tp_80_count=state_mgr.state.get("tp_80_count", 0) + 1,
-                        winning_trades=state_mgr.state.get("winning_trades", 0) + 1,
-                        total_trades=state_mgr.state.get("total_trades", 0) + 1
-                    )
-                    state_mgr.update_basket(
-                        b_id,
-                        tp_80_count=tp_count,
-                        winning_trades=wins,
-                        total_trades=trades_cnt
-                    )
+                    # 2. Update stats
+                    st_now = state_mgr.state
+                    tp_cnt = st_now.get("tp_80_count", 0) + 1
+                    win_cnt = st_now.get("winning_trades", 0) + 1
+                    tot_cnt = st_now.get("total_trades", 0) + 1
+                    state_mgr.update(tp_80_count=tp_cnt, winning_trades=win_cnt, total_trades=tot_cnt)
+                    state_mgr.update_basket(b_id, tp_80_count=b_st.get("tp_80_count", 0) + 1, winning_trades=b_st.get("winning_trades", 0) + 1)
 
-                    # Roll New Short in same trend with next-day expiry
-                    interval = CONFIG["STRIKE_INTERVAL"]
-                    atm = round(spot / interval) * interval
-                    T_init = 24.0 / (365.0 * 24.0)
-
-                    target_expiry_code = get_cycle_target_date_code()
-                    target_expiry_disp = get_cycle_target_expiry_display()
-
-                    if active_short["type"] == "P":
-                        new_k = atm - (short_step * interval)
-                        new_prem = bs_put(spot, new_k, T_init)
-                        roll_type = "P"
-                    else:
-                        new_k = atm + (short_step * interval)
-                        new_prem = bs_call(spot, new_k, T_init)
-                        roll_type = "C"
-
-                    new_s_prod = None
-                    if delta_client:
-                        try:
-                            new_s_prod = delta_client.find_option(roll_type, new_k, target_date=target_expiry_code)
-                            if new_s_prod:
-                                q_r = delta_client.get_ticker_quote(new_s_prod["symbol"])
-                                if q_r and q_r.get("mark_price", 0) > 0:
-                                    new_prem = round(q_r["mark_price"], 2)
-                                    logger.info(f"[{b_name}] Rolled live quote {new_s_prod['symbol']}: ${new_prem}")
-                        except Exception as e:
-                            logger.error(f"[{b_name}] Error quoting roll on Delta: {e}")
-
-                    # 2. Sell new rolled short on Delta Exchange Demo
-                    new_order_id = None
-                    if delta_client and new_s_prod and new_s_prod.get("id"):
-                        ok_rn, res_rn, _ = place_order_verified(delta_client, new_s_prod["id"], lots, "sell", f"{b_name} Rolled Sell Short {roll_type} {new_k}")
-                        if ok_rn and res_rn:
-                            new_order_id = res_rn.get("id")
-
-                    rolled_count = b_st.get("rolled_count", 0) + 1
-                    entry_time_ist = get_current_ist_str()
-
-                    new_short = {
-                        "type": roll_type,
-                        "strike": new_k,
-                        "product_symbol": new_s_prod["symbol"] if new_s_prod else None,
-                        "product_id": new_s_prod["id"] if new_s_prod else None,
-                        "order_id": new_order_id,
-                        "entry_prem": new_prem,
-                        "entry_spot": spot,
-                        "entry_time_ist": entry_time_ist,
-                        "sl_trigger": round(new_prem * 2.0, 2),
-                        "entry_time": datetime.now(timezone.utc).isoformat(),
-                        "hours_held": 0,
-                        "is_hedged": False,
-                        "expiry_code": target_expiry_code,
-                        "expiry_display": target_expiry_disp,
-                        "basket_id": b_id
-                    }
-                    state_mgr.update(rolled_count=state_mgr.state.get("rolled_count", 0) + 1)
-                    state_mgr.update_basket(b_id, active_short=new_short, rolled_count=rolled_count)
-
-                    cls.send_combined_baskets_alert(trigger_reason=f"80% PROFIT ROLLED [{b_name}]")
+                    cls.open_fresh_spread(curr_trend, basket_id=b_id)
+                    cls.send_combined_baskets_alert(trigger_reason="80% PROFIT BOOKED 🎯 (BASKET EXITED & NEXT-DAY BASKET OPENED)")
                 
                 elif expired:
                     s_settle_fee = calc_delta_fee(spot, val, qty) if val > 0 else 0.0
@@ -1435,10 +1390,10 @@ def live_candle_autotrader_loop():
                             logger.info(f"🚨 LIVE 1H FLIP DETECTED: {last_1h_trend} ➡️ {curr_1h} (4H: {curr_4h})")
                             last_1h_trend = curr_1h
                             telegram.send_message(
-                                f"🤖 <b>AUTONOMOUS LIVE SIGNAL DETECTED</b>\n"
+                                f"🤖 <b>1H SUPERTREND FLIP DETECTED</b>\n"
                                 f"<b>BTC Spot:</b> ${latest_spot:,.2f}\n"
-                                f"1H Supertrend flipped to <b>{curr_1h}</b> (4H Trend: <b>{curr_4h}</b>).\n"
-                                f"<i>Processing Dual Baskets (Basket 1 & Basket 2) automatically!</i>"
+                                f"1H Supertrend flipped: <b>{last_1h_trend} ➡️ {curr_1h}</b>.\n"
+                                f"<i>Exiting previous basket & opening fresh Next-Day Expiry Basket!</i>"
                             )
                             StrategyEngine.handle_signal(curr_1h, trend_4h=curr_4h)
                         else:
