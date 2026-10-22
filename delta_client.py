@@ -65,9 +65,9 @@ load_env_file()
 
 class DeltaClient:
     def __init__(self, api_key=None, api_secret=None, base_url=None):
-        self.api_key = api_key or os.getenv("DELTA_API_KEY", "BDERFCaZsygWC8X41ptfTZIm22iTqA")
-        self.api_secret = api_secret or os.getenv("DELTA_API_SECRET", "mQzIZP9BuMJs8o37DbDDIFfkl6AGHuDBvPVRZuloUraHen6SXPWzKc9zPtWJ")
-        self.base_url = base_url or os.getenv("DELTA_BASE_URL", "https://api.testnet.deltaex.org")
+        self.api_key = api_key or os.getenv("DELTA_API_KEY", "9GY1YAlETQtQVOxdP1hVcxwSkCZCy6")
+        self.api_secret = api_secret or os.getenv("DELTA_API_SECRET", "vlAWUvLbdSnSdtXD1174wnWHPbhRkv7ZwtzUMvIlhamOAZdquAg1bbN7LYwU")
+        self.base_url = base_url or os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
         self.ctx = ssl._create_unverified_context()
 
     def _sign_request(self, method, path, query_string="", payload=""):
@@ -78,7 +78,7 @@ class DeltaClient:
             "api-key": self.api_key,
             "timestamp": ts,
             "signature": sig,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "User-Agent": "python-rest-client",
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
@@ -90,20 +90,13 @@ class DeltaClient:
         payload_str = json.dumps(body) if body else ""
         data_bytes = payload_str.encode("utf-8") if body else None
 
-        # Build candidate base URLs (avoid CDN for authenticated / POST requests)
-        candidate_bases = [self.base_url]
-        if auth or method == "POST":
-            is_testnet = "testnet" in self.base_url or "demo" in self.base_url
-            api_fallbacks = ["https://api.testnet.deltaex.org", "https://api.testnet.delta.exchange"] if is_testnet else ["https://api.india.delta.exchange", "https://api.delta.exchange"]
-            cleaned = []
-            for b in candidate_bases:
-                c_clean = b.replace("cdn-ind.", "api.").replace("cdn.", "api.")
-                if c_clean not in cleaned:
-                    cleaned.append(c_clean)
-            for fb in api_fallbacks:
-                if fb not in cleaned:
-                    cleaned.append(fb)
-            candidate_bases = cleaned
+        # Build candidate base URLs
+        candidate_bases = ["https://cdn-ind.testnet.deltaex.org"]
+        if self.base_url and self.base_url not in candidate_bases:
+            candidate_bases.append(self.base_url)
+        candidate_bases.append("https://cdn.testnet.deltaex.org")
+        candidate_bases.append("https://testnet-api.delta.exchange")
+        candidate_bases = list(dict.fromkeys(candidate_bases))
 
         last_error = "Unknown error"
         last_code = 500
@@ -111,7 +104,7 @@ class DeltaClient:
         for b_url in candidate_bases:
             url = b_url + path + qs
             headers = self._sign_request(method, path, qs, payload_str) if auth else {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "User-Agent": "python-rest-client",
                 "Accept": "application/json",
                 "Content-Type": "application/json"
             }
