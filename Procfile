@@ -1,1 +1,1 @@
-web: python3 telegram_paper_bot.py
+web: python3 strangle_18delta_bot.py
