@@ -602,6 +602,9 @@ class StrategyEngine:
         basket_pnl_inr = basket_pnl * usd_to_inr
         pnl_str = f"${basket_pnl:+.2f} ({basket_pnl_inr:+,.0f} INR)"
 
+        delta_status = s.get("delta_status_note")
+        delta_line = f"\nExchange: {delta_status}\n" if delta_status else ""
+
         return (
             f"{b_name}\n\n"
             f"Strategy: {spread_name}\n"
@@ -617,7 +620,7 @@ class StrategyEngine:
             f"current trade value:\n"
             f"Sell {opt_type}: Strike ${s['strike']:,.0f} @ ${s_curr_prem:.2f}\n"
             f"Buy {opt_type}: Strike ${l['strike']:,.0f} @ ${l_curr_prem:.2f}\n\n"
-            f"Running Trade PnL : {pnl_str}"
+            f"Running Trade PnL : {pnl_str}{delta_line}"
         )
 
     @classmethod
@@ -799,18 +802,37 @@ class StrategyEngine:
         # LIVE DEMO ORDER EXECUTION ON DELTA EXCHANGE
         short_order_id = None
         long_order_id = None
+        delta_status_note = "Demo execution skipped (Delta Client not configured)"
         if delta_client:
             try:
+                err_msgs = []
                 if s_prod and s_prod.get("id"):
                     ok_s, res_s, err_s = place_order_verified(delta_client, s_prod["id"], lots, "sell", f"{b_name} Sell {opt_type} {s_strike}")
                     if ok_s and res_s:
                         short_order_id = res_s.get("id")
+                    else:
+                        err_msgs.append(f"Short Sell: {err_s}")
+                else:
+                    err_msgs.append(f"Short option strike ${s_strike} not found on Delta")
+
                 if l_prod and l_prod.get("id"):
                     ok_l, res_l, err_l = place_order_verified(delta_client, l_prod["id"], lots, "buy", f"{b_name} Buy {opt_type} {l_strike}")
                     if ok_l and res_l:
                         long_order_id = res_l.get("id")
+                    else:
+                        err_msgs.append(f"Long Buy: {err_l}")
+                else:
+                    err_msgs.append(f"Long option strike ${l_strike} not found on Delta")
+
+                if short_order_id and long_order_id:
+                    delta_status_note = f"✅ Orders Executed on Delta Demo (Short #{short_order_id} | Long #{long_order_id})"
+                elif short_order_id:
+                    delta_status_note = f"⚠️ Partial Fill (Short #{short_order_id} placed, Long failed: {'; '.join(err_msgs)})"
+                else:
+                    delta_status_note = f"❌ Delta Order Failed: {'; '.join(err_msgs)}"
             except Exception as e:
                 logger.error(f"[{b_name}] Exception placing Demo orders on Delta: {e}")
+                delta_status_note = f"❌ Error placing orders: {e}"
 
         fees = calc_delta_fee(spot, s_prem, qty) + calc_delta_fee(spot, l_prem, qty)
         net_credit = s_prem - l_prem
@@ -832,7 +854,8 @@ class StrategyEngine:
             "is_hedged": False,
             "expiry_code": target_date_code,
             "expiry_display": target_expiry_disp,
-            "basket_id": basket_id
+            "basket_id": basket_id,
+            "delta_status_note": delta_status_note
         }
         long_leg = {
             "type": opt_type,
